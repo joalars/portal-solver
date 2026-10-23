@@ -1,10 +1,14 @@
 mod pathfinding;
+mod updater;
 
 use std::{
     collections::BTreeMap,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
+    sync::mpsc::{self, Receiver, Sender},
+    thread,
+    time::Duration,
 };
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Sense, Stroke, Vec2};
@@ -32,6 +36,16 @@ struct PathfinderApp {
     editor_filename: String,
     editor_file_selection: Option<usize>,
     editor_loaded_file: Option<String>,
+    update_sender: Sender<UpdateEvent>,
+    update_receiver: Receiver<UpdateEvent>,
+    update_busy: bool,
+    available_update: Option<updater::Release>,
+    update_status: String,
+}
+
+enum UpdateEvent {
+    Checked(Result<Option<updater::Release>, String>),
+    Installed(Result<(), String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -42,6 +56,7 @@ enum AppMode {
 
 impl PathfinderApp {
     fn new() -> Self {
+        let (update_sender, update_receiver) = mpsc::channel();
         let mut app = Self {
             files: Vec::new(),
             selected_file: None,
@@ -57,9 +72,70 @@ impl PathfinderApp {
             editor_filename: String::new(),
             editor_file_selection: None,
             editor_loaded_file: None,
+            update_sender,
+            update_receiver,
+            update_busy: false,
+            available_update: None,
+            update_status: String::new(),
         };
         app.reload_files();
         app
+    }
+
+    fn check_for_updates(&mut self) {
+        self.update_busy = true;
+        self.available_update = None;
+        self.update_status = "Checking GitHub for updates…".to_owned();
+        let sender = self.update_sender.clone();
+        thread::spawn(move || {
+            let _ = sender.send(UpdateEvent::Checked(updater::check_for_update()));
+        });
+    }
+
+    fn install_update(&mut self) {
+        let Some(release) = self.available_update.clone() else {
+            self.update_status = "Check for an update before installing.".to_owned();
+            return;
+        };
+        self.update_busy = true;
+        self.update_status = format!("Downloading version {}…", release.version);
+        let sender = self.update_sender.clone();
+        thread::spawn(move || {
+            let _ = sender.send(UpdateEvent::Installed(updater::install_and_restart(
+                &release,
+            )));
+        });
+    }
+
+    fn poll_update_events(&mut self, context: &egui::Context) {
+        while let Ok(event) = self.update_receiver.try_recv() {
+            match event {
+                UpdateEvent::Checked(Ok(Some(release))) => {
+                    self.update_status = format!("Version {} is available.", release.version);
+                    self.available_update = Some(release);
+                    self.update_busy = false;
+                }
+                UpdateEvent::Checked(Ok(None)) => {
+                    self.update_status = "You are already using the latest release.".to_owned();
+                    self.update_busy = false;
+                }
+                UpdateEvent::Checked(Err(error)) => {
+                    self.update_status = error;
+                    self.update_busy = false;
+                }
+                UpdateEvent::Installed(Ok(())) => {
+                    self.update_status = "Update installed; restarting…".to_owned();
+                    context.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                UpdateEvent::Installed(Err(error)) => {
+                    self.update_status = error;
+                    self.update_busy = false;
+                }
+            }
+        }
+        if self.update_busy {
+            context.request_repaint_after(Duration::from_millis(200));
+        }
     }
 
     fn reload_files(&mut self) {
@@ -291,10 +367,6 @@ impl PathfinderApp {
                 return;
             }
         };
-        if let Err(error) = fs::create_dir_all(&directory) {
-            self.message = format!("Could not create {}: {error}", directory.display());
-            return;
-        }
         let path = directory.join(&filename);
         let contents = match serde_json::to_vec_pretty(&self.editor_graph) {
             Ok(contents) => contents,
@@ -366,18 +438,47 @@ impl PortalFile {
 fn find_portal_directory() -> Result<PathBuf, String> {
     let executable = std::env::current_exe()
         .map_err(|error| format!("Could not locate the application executable: {error}"))?;
-    let adjacent = executable
+    let directory = executable
         .parent()
         .ok_or_else(|| "Could not locate the application directory.".to_owned())?
         .join("portals");
-    if adjacent.exists() {
-        return Ok(adjacent);
+    ensure_portal_directory(&directory)
+}
+
+fn ensure_portal_directory(directory: &Path) -> Result<PathBuf, String> {
+    fs::create_dir_all(directory)
+        .map_err(|error| format!("Could not create {}: {error}", directory.display()))?;
+    let example_path = directory.join("example.json");
+    let mut example = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&example_path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Ok(directory.to_path_buf());
+        }
+        Err(error) => {
+            return Err(format!(
+                "Could not create default map {}: {error}",
+                example_path.display()
+            ));
+        }
+    };
+    if let Err(error) = example.write_all(include_bytes!("../portals/example.json")) {
+        drop(example);
+        if let Err(cleanup_error) = fs::remove_file(&example_path) {
+            return Err(format!(
+                "Could not write default map {}: {error}; also failed to remove the incomplete file: {cleanup_error}",
+                example_path.display()
+            ));
+        }
+        return Err(format!(
+            "Could not write default map {}: {error}",
+            example_path.display()
+        ));
     }
-    let development = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("portals");
-    if development.exists() {
-        return Ok(development);
-    }
-    Ok(adjacent)
+    Ok(directory.to_path_buf())
 }
 
 fn parse_zone(value: &str, label: &str) -> Result<u64, String> {
@@ -389,12 +490,31 @@ fn parse_zone(value: &str, label: &str) -> Result<u64, String> {
 
 impl eframe::App for PathfinderApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_update_events(context);
         let mut visuals = egui::Visuals::dark();
         visuals.override_text_color = Some(Color32::from_rgb(240, 244, 255));
         context.set_visuals(visuals);
 
         egui::CentralPanel::default().show(context, |ui| {
             ui.heading("Portal Path Finder");
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!self.update_busy, egui::Button::new("Check for updates"))
+                    .clicked()
+                {
+                    self.check_for_updates();
+                }
+                if let Some(release) = &self.available_update {
+                    let label = format!("Install {} and restart", release.version);
+                    if ui
+                        .add_enabled(!self.update_busy, egui::Button::new(label))
+                        .clicked()
+                    {
+                        self.install_update();
+                    }
+                }
+                ui.label(&self.update_status);
+            });
             ui.horizontal(|ui| {
                 ui.label("Mode:");
                 egui::ComboBox::from_id_salt("app_mode")
@@ -1070,7 +1190,13 @@ fn main() -> eframe::Result {
 
 #[cfg(test)]
 mod tests {
-    use super::{complete_grid, empty_map, json_filename, zone_coordinates};
+    use super::{
+        complete_grid, empty_map, ensure_portal_directory, json_filename, zone_coordinates,
+    };
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn zone_ids_map_to_x_then_y_coordinates() {
@@ -1116,5 +1242,30 @@ mod tests {
         assert_eq!(json_filename("my-map.JSON"), Some("my-map.json".to_owned()));
         assert_eq!(json_filename("../map"), None);
         assert_eq!(json_filename(""), None);
+    }
+
+    #[test]
+    fn creates_adjacent_portal_folder_with_example_without_overwriting() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "portal-solver-portals-test-{}-{unique}",
+            std::process::id()
+        ));
+
+        let created = ensure_portal_directory(&directory).unwrap();
+        assert_eq!(created, directory);
+        let example_path = directory.join("example.json");
+        assert_eq!(
+            fs::read_to_string(&example_path).unwrap(),
+            include_str!("../portals/example.json")
+        );
+
+        fs::write(&example_path, b"custom map").unwrap();
+        ensure_portal_directory(&directory).unwrap();
+        assert_eq!(fs::read(&example_path).unwrap(), b"custom map");
+        fs::remove_dir_all(directory).unwrap();
     }
 }

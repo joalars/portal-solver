@@ -10,11 +10,12 @@ the destination has a south portal back.
 cargo run
 ```
 
-The app looks for `portals/*.json` next to the executable. When run with
-`cargo run`, it falls back to the repository's `portals/` directory if the
-executable's adjacent directory does not exist. For a portable build, distribute
-the executable with a `portals/` directory beside it. Use **Reload files** to
-pick up JSON files added while the app is open.
+The app stores `portals/*.json` next to the executable in every run mode,
+including `cargo run` (where the executable is under `target/debug/`). If that
+folder or its `example.json` map is missing, the app creates the folder and
+copies in the built-in example map. For a portable build, distribute the
+executable with its `portals/` folder. Use **Reload files** to pick up JSON files
+added while the app is open.
 
 The included `portals/example.json` can be used to try a route from zone `11`
 to zone `33`. In path finder mode, click the 5×5 grid to set the start and then
@@ -69,3 +70,15 @@ X followed by Y (`12` is X=1, Y=2). To change an existing map, select it under
 
 In both modes, the grid stays above the mode's instructions, controls, and route
 details so updates to those displays do not move the grid.
+
+## Updating
+
+Use **Check for updates** to check the latest stable GitHub release. If a newer
+release is available, choose **Install <version> and restart**. Automatic
+replacement is currently supported for Linux x86_64; the updater preserves the
+`portals/` directory and only replaces the application executable.
+
+Tagged releases named `v<version>` are built and published by the GitHub Actions
+workflow. Before publishing, update the Cargo package version to match the tag;
+the workflow checks this and attaches the `portal-solver-linux-x86_64` executable
+that the updater expects.

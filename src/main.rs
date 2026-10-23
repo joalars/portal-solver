@@ -79,6 +79,7 @@ impl PathfinderApp {
             update_status: String::new(),
         };
         app.reload_files();
+        app.check_for_updates();
         app
     }
 
@@ -116,7 +117,7 @@ impl PathfinderApp {
                     self.update_busy = false;
                 }
                 UpdateEvent::Checked(Ok(None)) => {
-                    self.update_status = "You are already using the latest release.".to_owned();
+                    self.update_status.clear();
                     self.update_busy = false;
                 }
                 UpdateEvent::Checked(Err(error)) => {
@@ -498,14 +499,8 @@ impl eframe::App for PathfinderApp {
         egui::CentralPanel::default().show(context, |ui| {
             ui.heading("Portal Path Finder");
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(!self.update_busy, egui::Button::new("Check for updates"))
-                    .clicked()
-                {
-                    self.check_for_updates();
-                }
                 if let Some(release) = &self.available_update {
-                    let label = format!("Install {} and restart", release.version);
+                    let label = format!("Update to {} and restart", release.version);
                     if ui
                         .add_enabled(!self.update_busy, egui::Button::new(label))
                         .clicked()
@@ -513,7 +508,9 @@ impl eframe::App for PathfinderApp {
                         self.install_update();
                     }
                 }
-                ui.label(&self.update_status);
+                if !self.update_status.is_empty() {
+                    ui.label(&self.update_status);
+                }
             });
             ui.horizontal(|ui| {
                 ui.label("Mode:");

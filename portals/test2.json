@@ -13,15 +13,15 @@
   },
   "13": {
     "west": 0,
-    "north": 0,
+    "north": 33,
     "east": 0,
-    "south": 0
+    "south": 44
   },
   "14": {
-    "west": 0,
-    "north": 0,
-    "east": 0,
-    "south": 0
+    "west": 13,
+    "north": 55,
+    "east": 23,
+    "south": 25
   },
   "15": {
     "west": 0,
@@ -72,7 +72,7 @@
     "south": 0
   },
   "33": {
-    "west": 0,
+    "west": 11,
     "north": 0,
     "east": 0,
     "south": 0

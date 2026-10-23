@@ -30,6 +30,8 @@ struct PathfinderApp {
     editor_selected: u64,
     editor_targets: [String; 4],
     editor_filename: String,
+    editor_file_selection: Option<usize>,
+    editor_loaded_file: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -53,6 +55,8 @@ impl PathfinderApp {
             editor_selected: 11,
             editor_targets: std::array::from_fn(|_| "0".to_owned()),
             editor_filename: String::new(),
+            editor_file_selection: None,
+            editor_loaded_file: None,
         };
         app.reload_files();
         app
@@ -168,6 +172,39 @@ impl PathfinderApp {
         ];
     }
 
+    fn load_editor_file(&mut self) {
+        let Some(index) = self.editor_file_selection else {
+            self.message = "Select a valid portal map to load.".to_owned();
+            return;
+        };
+        let Some(file) = self.files.get(index) else {
+            self.message =
+                "The selected portal map is no longer available; reload files.".to_owned();
+            return;
+        };
+        let name = file.name.clone();
+        let mut graph = match &file.graph {
+            Ok(graph) => graph.clone(),
+            Err(error) => {
+                self.message = format!("Cannot edit this file: {error}");
+                return;
+            }
+        };
+        if graph.keys().any(|zone| zone_coordinates(*zone).is_none()) {
+            self.message =
+                "Cannot edit this map: all zone IDs must be within the 5×5 grid (11–55)."
+                    .to_owned();
+            return;
+        }
+        graph = complete_grid(graph);
+        self.editor_graph = graph;
+        self.editor_selected = 11;
+        self.select_editor_node(self.editor_selected);
+        self.editor_filename = name.clone();
+        self.editor_loaded_file = Some(name.clone());
+        self.message = format!("Loaded {name} for editing.");
+    }
+
     fn apply_editor_targets(&mut self) -> Result<(), String> {
         let mut targets = [0; 4];
         for (index, value) in self.editor_targets.iter().enumerate() {
@@ -198,6 +235,42 @@ impl PathfinderApp {
             },
         );
         Ok(())
+    }
+
+    fn save_editor_changes(&mut self) {
+        let Some(filename) = self.editor_loaded_file.clone() else {
+            self.message = "Load an existing map before saving changes.".to_owned();
+            return;
+        };
+        if let Err(error) = self.apply_editor_targets() {
+            self.message = error;
+            return;
+        }
+        let directory = match find_portal_directory() {
+            Ok(directory) => directory,
+            Err(error) => {
+                self.message = error;
+                return;
+            }
+        };
+        let path = directory.join(&filename);
+        let contents = match serde_json::to_vec_pretty(&self.editor_graph) {
+            Ok(contents) => contents,
+            Err(error) => {
+                self.message = format!("Could not encode portal map: {error}");
+                return;
+            }
+        };
+        match write_atomically(&path, &contents) {
+            Ok(()) => {
+                self.reload_files();
+                self.editor_file_selection =
+                    self.files.iter().position(|file| file.name == filename);
+                self.selected_file = self.editor_file_selection;
+                self.message = format!("Saved changes to {}.", path.display());
+            }
+            Err(error) => self.message = format!("Could not save {}: {error}", path.display()),
+        }
     }
 
     fn save_editor_file(&mut self) {
@@ -261,6 +334,9 @@ impl PathfinderApp {
             .files
             .iter()
             .position(|portal_file| portal_file.name == filename);
+        self.editor_file_selection = self.selected_file;
+        self.editor_loaded_file = Some(filename.clone());
+        self.editor_filename = filename.clone();
         self.message = format!("Saved {}.", path.display());
     }
 }
@@ -339,6 +415,40 @@ impl eframe::App for PathfinderApp {
 
             match self.mode {
                 AppMode::Pathfinder => {
+                    let clicked_zone = if let Some(graph) = self.active_graph() {
+                        draw_topology(
+                            ui,
+                            graph,
+                            self.route.as_ref(),
+                            &self.start,
+                            &self.destination,
+                        )
+                    } else {
+                        ui.allocate_space(Vec2::new(ui.available_width(), 460.0));
+                        None
+                    };
+                    if let Some(zone) = clicked_zone {
+                        self.route = None;
+                        if self.next_click_is_start {
+                            self.start = zone.to_string();
+                            self.destination.clear();
+                            self.message = format!(
+                                "Start set to zone {zone}. Click the grid again to choose a destination."
+                            );
+                            self.next_click_is_start = false;
+                        } else {
+                            self.destination = zone.to_string();
+                            self.message = format!("Destination set to zone {zone}.");
+                            self.next_click_is_start = true;
+                            self.find_route();
+                        }
+                    }
+
+                    ui.separator();
+                    ui.label("5×5 coordinate grid (portal destinations may be non-adjacent):");
+                    if self.active_graph().is_none() {
+                        ui.label("Choose a valid portal file to display its topology.");
+                    }
                     ui.label("Find the shortest route through directed, non-Euclidean portals.");
                     ui.horizontal(|ui| {
                         ui.label("Portal file:");
@@ -391,7 +501,7 @@ impl eframe::App for PathfinderApp {
                     });
 
                     ui.label("Zone IDs encode X then Y (for example, 12 is X=1, Y=2).");
-                    ui.label("Click the grid to choose start, then destination; clicks alternate.");
+                    ui.label("Click the grid to choose start, then destination; pathfinding runs automatically.");
                     ui.label(&self.message);
                     if let Some(route) = &self.route {
                         ui.horizontal_wrapped(|ui| {
@@ -418,37 +528,6 @@ impl eframe::App for PathfinderApp {
                         ));
                     }
 
-                    ui.separator();
-                    ui.label("5×5 coordinate grid (portal destinations may be non-adjacent):");
-                    let clicked_zone = if let Some(graph) = self.active_graph() {
-                        draw_topology(
-                            ui,
-                            graph,
-                            self.route.as_ref(),
-                            &self.start,
-                            &self.destination,
-                        )
-                    } else {
-                        ui.label("Choose a valid portal file to display its topology.");
-                        None
-                    };
-                    if let Some(zone) = clicked_zone {
-                        self.route = None;
-                        if self.next_click_is_start {
-                            self.start = zone.to_string();
-                            self.destination.clear();
-                            self.message = format!(
-                                "Start set to zone {zone}. Click the grid again to choose a destination."
-                            );
-                        } else {
-                            self.destination = zone.to_string();
-                            self.message = format!(
-                                "Destination set to zone {zone}. Choose Find shortest path to calculate the route."
-                            );
-                        }
-                        self.next_click_is_start = !self.next_click_is_start;
-                    }
-
                     if let Some(file) = self
                         .selected_file
                         .and_then(|index| self.files.get(index))
@@ -460,22 +539,63 @@ impl eframe::App for PathfinderApp {
                     }
                 }
                 AppMode::Editor => {
-                    ui.label("Select a node, enter its portal destination zone IDs, then save a new map.");
+                    let clicked_node =
+                        draw_editor_grid(ui, &self.editor_graph, self.editor_selected);
+                    if let Some(zone) = clicked_node {
+                        self.select_editor_node(zone);
+                    }
+
+                    ui.separator();
+                    ui.label("5×5 map editor grid; click a node to configure its portals.");
+                    ui.label("Select a node, enter its portal destination zone IDs, then save a map.");
+                    let selected_editor_name = self
+                        .editor_file_selection
+                        .and_then(|index| self.files.get(index))
+                        .map_or_else(|| "Select existing map".to_owned(), |file| file.name.clone());
+                    let mut load_editor_map = false;
+                    ui.horizontal(|ui| {
+                        ui.label("Existing map:");
+                        egui::ComboBox::from_id_salt("editor_file")
+                            .selected_text(selected_editor_name)
+                            .show_ui(ui, |ui| {
+                                for (index, file) in self.files.iter().enumerate() {
+                                    let label = if file.graph.is_ok() {
+                                        file.name.clone()
+                                    } else {
+                                        format!("{} (invalid)", file.name)
+                                    };
+                                    ui.selectable_value(
+                                        &mut self.editor_file_selection,
+                                        Some(index),
+                                        label,
+                                    );
+                                }
+                            });
+                        load_editor_map = ui.button("Load for editing").clicked();
+                        if ui.button("Reload files").clicked() {
+                            self.reload_files();
+                            self.editor_file_selection = self
+                                .editor_loaded_file
+                                .as_ref()
+                                .and_then(|name| self.files.iter().position(|file| &file.name == name));
+                        }
+                    });
+                    if load_editor_map {
+                        self.load_editor_file();
+                    }
                     ui.horizontal(|ui| {
                         ui.label("Selected node:");
                         ui.strong(self.editor_selected.to_string());
                         if ui.button("New empty map").clicked() {
                             self.editor_graph = empty_map();
+                            self.editor_selected = 11;
                             self.editor_filename.clear();
+                            self.editor_file_selection = None;
+                            self.editor_loaded_file = None;
                             self.editor_targets = std::array::from_fn(|_| "0".to_owned());
                             self.message = "Started a new empty 5×5 map.".to_owned();
                         }
                     });
-
-                    let clicked_node = draw_editor_grid(ui, &self.editor_graph, self.editor_selected);
-                    if let Some(zone) = clicked_node {
-                        self.select_editor_node(zone);
-                    }
 
                     ui.label(format!("Targets from node {} (0 means no portal):", self.editor_selected));
                     let mut apply_targets = false;
@@ -524,6 +644,16 @@ impl eframe::App for PathfinderApp {
                             self.save_editor_file();
                         }
                     });
+                    if let Some(filename) = &self.editor_loaded_file {
+                        let mut save_existing = false;
+                        ui.horizontal(|ui| {
+                            ui.label(format!("Editing {filename}"));
+                            save_existing = ui.button("Save changes").clicked();
+                        });
+                        if save_existing {
+                            self.save_editor_changes();
+                        }
+                    }
 
                     ui.label("Targets must be zone IDs from 11 to 55; blank or 0 means no portal.");
                     ui.label(&self.message);
@@ -548,6 +678,52 @@ fn empty_map() -> BTreeMap<u64, PortalExits> {
         .flat_map(|x| (1..=GRID_SIZE).map(move |y| (x * 10 + y) as u64))
         .map(|zone| (zone, PortalExits::default()))
         .collect()
+}
+
+fn complete_grid(mut graph: BTreeMap<u64, PortalExits>) -> BTreeMap<u64, PortalExits> {
+    for x in 1..=GRID_SIZE {
+        for y in 1..=GRID_SIZE {
+            graph.entry((x * 10 + y) as u64).or_default();
+        }
+    }
+    graph
+}
+
+fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(std::io::Error::other)?
+        .as_nanos();
+    let filename = path
+        .file_name()
+        .map_or_else(|| "portal-map".into(), |name| name.to_string_lossy());
+    let temporary_path = path.with_file_name(format!(
+        ".{filename}.{}.{}.tmp",
+        std::process::id(),
+        timestamp
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary_path, path)
+    })();
+    if let Err(error) = result {
+        if temporary_path.exists()
+            && let Err(cleanup_error) = fs::remove_file(&temporary_path)
+        {
+            return Err(std::io::Error::other(format!(
+                "{error}; failed to remove temporary file {}: {cleanup_error}",
+                temporary_path.display()
+            )));
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn json_filename(input: &str) -> Option<String> {
@@ -894,7 +1070,7 @@ fn main() -> eframe::Result {
 
 #[cfg(test)]
 mod tests {
-    use super::{empty_map, json_filename, zone_coordinates};
+    use super::{complete_grid, empty_map, json_filename, zone_coordinates};
 
     #[test]
     fn zone_ids_map_to_x_then_y_coordinates() {
@@ -906,6 +1082,23 @@ mod tests {
     #[test]
     fn editor_starts_with_all_twenty_five_grid_nodes() {
         assert_eq!(empty_map().len(), 25);
+    }
+
+    #[test]
+    fn loading_a_sparse_map_adds_editable_nodes_without_changing_existing_exits() {
+        let mut graph = std::collections::BTreeMap::new();
+        graph.insert(
+            12,
+            crate::pathfinding::PortalExits {
+                east: 33,
+                ..Default::default()
+            },
+        );
+
+        let graph = complete_grid(graph);
+        assert_eq!(graph.len(), 25);
+        assert_eq!(graph[&12].east, 33);
+        assert_eq!(graph[&11].east, 0);
     }
 
     #[test]

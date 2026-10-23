@@ -18,7 +18,8 @@ pick up JSON files added while the app is open.
 
 The included `portals/example.json` can be used to try a route from zone `11`
 to zone `33`. In path finder mode, click the 5×5 grid to set the start and then
-the destination; clicks alternate between the two positions.
+the destination; clicks alternate between the two positions and the route is
+calculated automatically when the destination is selected.
 
 ## Portal JSON format
 
@@ -62,4 +63,9 @@ Choose **Map editor** from the mode selector. Click a node on the 5×5 grid,
 enter the destination zone ID for each direction (`0` or blank means no portal),
 and choose **Apply targets** to preview its links. Enter a new file name and
 choose **Create JSON file** to save it in the `portals/` folder. Zone IDs use
-X followed by Y (`12` is X=1, Y=2). Existing files are not overwritten.
+X followed by Y (`12` is X=1, Y=2). To change an existing map, select it under
+**Existing map**, choose **Load for editing**, then use **Save changes**.
+**Create JSON file** always creates a separate file and will not overwrite one.
+
+In both modes, the grid stays above the mode's instructions, controls, and route
+details so updates to those displays do not move the grid.

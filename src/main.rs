@@ -41,6 +41,7 @@ struct PathfinderApp {
     update_busy: bool,
     available_update: Option<updater::Release>,
     update_status: String,
+    confirm_update: bool,
 }
 
 enum UpdateEvent {
@@ -77,6 +78,7 @@ impl PathfinderApp {
             update_busy: false,
             available_update: None,
             update_status: String::new(),
+            confirm_update: false,
         };
         app.reload_files();
         app.check_for_updates();
@@ -112,7 +114,7 @@ impl PathfinderApp {
         while let Ok(event) = self.update_receiver.try_recv() {
             match event {
                 UpdateEvent::Checked(Ok(Some(release))) => {
-                    self.update_status = format!("Version {} is available.", release.version);
+                    self.update_status.clear();
                     self.available_update = Some(release);
                     self.update_busy = false;
                 }
@@ -500,12 +502,12 @@ impl eframe::App for PathfinderApp {
             ui.heading("Portal Path Finder");
             ui.horizontal(|ui| {
                 if let Some(release) = &self.available_update {
-                    let label = format!("Update to {} and restart", release.version);
+                    let label = format!("Install {} and restart", release.version);
                     if ui
                         .add_enabled(!self.update_busy, egui::Button::new(label))
                         .clicked()
                     {
-                        self.install_update();
+                        self.confirm_update = true;
                     }
                 }
                 if !self.update_status.is_empty() {
@@ -777,6 +779,39 @@ impl eframe::App for PathfinderApp {
                 }
             }
         });
+
+        if self.confirm_update {
+            let version = self.available_update.as_ref().map_or_else(
+                || "the available version".to_owned(),
+                |release| release.version.clone(),
+            );
+            let mut dialog_open = self.confirm_update;
+            let mut cancel_clicked = false;
+            let mut confirmed = false;
+            egui::Window::new("Confirm update")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+                .open(&mut dialog_open)
+                .show(context, |ui| {
+                    ui.label(format!(
+                        "Install version {version} and restart the application?"
+                    ));
+                    ui.label("The application executable will be replaced.");
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            cancel_clicked = true;
+                        }
+                        if ui.button("Install and restart").clicked() {
+                            confirmed = true;
+                        }
+                    });
+                });
+            self.confirm_update = dialog_open && !cancel_clicked && !confirmed;
+            if confirmed {
+                self.install_update();
+            }
+        }
     }
 }
 

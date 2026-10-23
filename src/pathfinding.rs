@@ -26,15 +26,6 @@ impl Direction {
                 | (Self::South, Self::North)
         )
     }
-
-    pub fn short_name(self) -> &'static str {
-        match self {
-            Self::West => "W",
-            Self::North => "N",
-            Self::East => "E",
-            Self::South => "S",
-        }
-    }
 }
 
 impl std::fmt::Display for Direction {

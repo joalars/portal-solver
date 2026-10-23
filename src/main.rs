@@ -12,7 +12,7 @@ use std::{
 };
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Sense, Stroke, Vec2};
-use pathfinding::{Direction, PortalExits, Route, shortest_path};
+use pathfinding::{PortalExits, Route, shortest_path};
 
 const GRID_SIZE: usize = 5;
 
@@ -933,17 +933,11 @@ fn draw_editor_grid(
         let Some(source_position) = position(*source) else {
             continue;
         };
-        for (direction, destination) in exits.iter() {
+        for (_, destination) in exits.iter() {
             let Some(destination_position) = position(destination) else {
                 continue;
             };
-            draw_edge(
-                &painter,
-                source_position,
-                destination_position,
-                direction,
-                false,
-            );
+            draw_edge(&painter, source_position, destination_position, false);
         }
     }
 
@@ -1075,13 +1069,7 @@ fn draw_topology(
             if !highlighted {
                 continue;
             }
-            draw_edge(
-                &painter,
-                source_position,
-                destination_position,
-                direction,
-                highlighted,
-            );
+            draw_edge(&painter, source_position, destination_position, highlighted);
         }
     }
 
@@ -1128,13 +1116,7 @@ fn draw_topology(
     None
 }
 
-fn draw_edge(
-    painter: &egui::Painter,
-    source: Pos2,
-    destination: Pos2,
-    direction: Direction,
-    highlighted: bool,
-) {
+fn draw_edge(painter: &egui::Painter, source: Pos2, destination: Pos2, highlighted: bool) {
     let delta = destination - source;
     let length = delta.length();
     if length < 36.0 {
@@ -1161,19 +1143,6 @@ fn draw_edge(
         color,
         Stroke::NONE,
     ));
-    let label_position = Pos2::new((start.x + end.x) / 2.0, (start.y + end.y) / 2.0);
-    painter.rect_filled(
-        egui::Rect::from_center_size(label_position, Vec2::new(20.0, 18.0)),
-        4.0,
-        Color32::from_rgb(25, 35, 75),
-    );
-    painter.text(
-        label_position,
-        Align2::CENTER_CENTER,
-        direction.short_name(),
-        FontId::proportional(12.0),
-        Color32::WHITE,
-    );
 }
 
 fn main() -> eframe::Result {

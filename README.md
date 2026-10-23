@@ -1,14 +1,23 @@
-# Portal Path Finder
+# Portal Solver
 
-A native desktop app for finding the fewest portal hops between numeric zones.
+A native desktop app for finding the fewest portal hops between numeric zones
+and creating/editing portal maps. The executable is named `portal-solver`.
 Portals are directed: a portal leading north from one zone does not imply that
 the destination has a south portal back.
 
-## Run
+## Build and run
 
 ```sh
 cargo run
 ```
+
+Build a standalone executable with:
+
+```sh
+cargo build --release
+```
+
+The release executable is `target/release/portal-solver`.
 
 The app stores `portals/*.json` next to the executable in every run mode,
 including `cargo run` (where the executable is under `target/debug/`). If that
@@ -71,14 +80,18 @@ X followed by Y (`12` is X=1, Y=2). To change an existing map, select it under
 In both modes, the grid stays above the mode's instructions, controls, and route
 details so updates to those displays do not move the grid.
 
-## Updating
+## Updating the app
 
-Use **Check for updates** to check the latest stable GitHub release. If a newer
-release is available, choose **Install <version> and restart**. Automatic
-replacement is currently supported for Linux x86_64; the updater preserves the
-`portals/` directory and only replaces the application executable.
+At startup, the app checks GitHub for a newer stable release in the background.
+If one is available, it displays **Install <version> and restart**. Selecting
+that option opens a confirmation dialog; the download and installation begin
+only after confirmation. When there is no update, no update button or status
+message is shown. Check failures are displayed in the window.
+
+Automatic download and replacement are currently supported on Linux x86_64.
+The installer validates the downloaded executable, preserves the adjacent
+`portals/` directory, replaces only the app binary, and restarts the app.
 
 Tagged releases named `v<version>` are built and published by the GitHub Actions
-workflow. Before publishing, update the Cargo package version to match the tag;
-the workflow checks this and attaches the `portal-solver-linux-x86_64` executable
-that the updater expects.
+workflow. The tag must match the Cargo package version; the workflow checks this
+and attaches the `portal-solver-linux-x86_64` executable expected by the updater.

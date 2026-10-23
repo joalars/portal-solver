@@ -1,0 +1,152 @@
+{
+  "11": {
+    "west": 55,
+    "north": 25,
+    "east": 41,
+    "south": 14
+  },
+  "12": {
+    "west": 0,
+    "north": 0,
+    "east": 0,
+    "south": 0
+  },
+  "13": {
+    "west": 0,
+    "north": 0,
+    "east": 0,
+    "south": 0
+  },
+  "14": {
+    "west": 0,
+    "north": 0,
+    "east": 0,
+    "south": 0
+  },
+  "15": {
+    "west": 0,
+    "north": 0,
+    "east": 0,
+    "south": 0
+  },
+  "21": {
+    "west": 0,
+    "north": 0,
+    "east": 0,
+    "south": 0
+  },
+  "22": {
+    "west": 0,
+    "north": 0,
+    "east": 0,
+    "south": 0
+  },
+  "23": {
+    "west": 0,
+    "north": 11,
+    "east": 44,
+    "south": 0
+  },
+  "24": {
+    "west": 0,
+    "north": 0,
+    "east": 0,
+    "south": 0
+  },
+  "25": {
+    "west": 0,
+    "north": 0,
+    "east": 0,
+    "south": 0
+  },
+  "31": {
+    "west": 0,
+    "north": 0,
+    "east": 0,
+    "south": 0
+  },
+  "32": {
+    "west": 0,
+    "north": 0,
+    "east": 0,
+    "south": 0
+  },
+  "33": {
+    "west": 0,
+    "north": 0,
+    "east": 0,
+    "south": 0
+  },
+  "34": {
+    "west": 0,
+    "north": 0,
+    "east": 0,
+    "south": 0
+  },
+  "35": {
+    "west": 0,
+    "north": 0,
+    "east": 0,
+    "south": 0
+  },
+  "41": {
+    "west": 11,
+    "north": 55,
+    "east": 24,
+    "south": 14
+  },
+  "42": {
+    "west": 0,
+    "north": 0,
+    "east": 0,
+    "south": 0
+  },
+  "43": {
+    "west": 0,
+    "north": 0,
+    "east": 0,
+    "south": 0
+  },
+  "44": {
+    "west": 0,
+    "north": 0,
+    "east": 0,
+    "south": 0
+  },
+  "45": {
+    "west": 0,
+    "north": 0,
+    "east": 0,
+    "south": 0
+  },
+  "51": {
+    "west": 0,
+    "north": 0,
+    "east": 0,
+    "south": 0
+  },
+  "52": {
+    "west": 0,
+    "north": 0,
+    "east": 0,
+    "south": 0
+  },
+  "53": {
+    "west": 0,
+    "north": 0,
+    "east": 0,
+    "south": 0
+  },
+  "54": {
+    "west": 0,
+    "north": 0,
+    "east": 0,
+    "south": 0
+  },
+  "55": {
+    "west": 14,
+    "north": 25,
+    "east": 23,
+    "south": 44
+  }
+}

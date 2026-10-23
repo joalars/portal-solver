@@ -1,0 +1,32 @@
+{
+  "11": {
+    "west": 12,
+    "east": 21,
+    "north": 0,
+    "south": 0
+  },
+  "12": {
+    "west": 0,
+    "east": 0,
+    "north": 22,
+    "south": 0
+  },
+  "21": {
+    "west": 0,
+    "east": 22,
+    "north": 0,
+    "south": 0
+  },
+  "22": {
+    "west": 0,
+    "east": 0,
+    "north": 0,
+    "south": 33
+  },
+  "33": {
+    "west": 0,
+    "east": 0,
+    "north": 0,
+    "south": 0
+  }
+}

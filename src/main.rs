@@ -12,13 +12,26 @@ use std::{
 };
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Sense, Stroke, Vec2};
-use pathfinding::{PortalExits, Route, shortest_path};
+use pathfinding::{Direction, PortalExits, Route, shortest_path};
 
 const GRID_SIZE: usize = 5;
 
 struct PortalFile {
     name: String,
     graph: Result<BTreeMap<u64, PortalExits>, String>,
+}
+
+enum GridInteraction {
+    Click(u64),
+    DragStarted(u64),
+    DragEnded(Option<u64>),
+}
+
+enum EditorGridInteraction {
+    NodeClicked(u64),
+    HandleClicked(u64, Direction),
+    HandleDragStarted(u64, Direction),
+    HandleDragEnded(Option<u64>),
 }
 
 struct PathfinderApp {
@@ -30,9 +43,12 @@ struct PathfinderApp {
     message: String,
     mode: AppMode,
     next_click_is_start: bool,
+    drag_start: Option<u64>,
     editor_graph: BTreeMap<u64, PortalExits>,
     editor_selected: u64,
     editor_targets: [String; 4],
+    editor_pending_target: Option<(u64, Direction)>,
+    editor_drag: Option<(u64, Direction)>,
     editor_filename: String,
     editor_file_selection: Option<usize>,
     editor_loaded_file: Option<String>,
@@ -67,9 +83,12 @@ impl PathfinderApp {
             message: String::new(),
             mode: AppMode::Pathfinder,
             next_click_is_start: true,
+            drag_start: None,
             editor_graph: empty_map(),
             editor_selected: 11,
             editor_targets: std::array::from_fn(|_| "0".to_owned()),
+            editor_pending_target: None,
+            editor_drag: None,
             editor_filename: String::new(),
             editor_file_selection: None,
             editor_loaded_file: None,
@@ -143,6 +162,10 @@ impl PathfinderApp {
 
     fn reload_files(&mut self) {
         self.route = None;
+        self.start.clear();
+        self.destination.clear();
+        self.next_click_is_start = true;
+        self.drag_start = None;
         match find_portal_directory() {
             Ok(directory) => match fs::read_dir(&directory) {
                 Ok(entries) => {
@@ -249,6 +272,26 @@ impl PathfinderApp {
             exits.east.to_string(),
             exits.south.to_string(),
         ];
+    }
+
+    fn set_editor_target(&mut self, source: u64, direction: Direction, target: u64) {
+        let exits = self.editor_graph.entry(source).or_default();
+        let current_target = match direction {
+            Direction::West => &mut exits.west,
+            Direction::North => &mut exits.north,
+            Direction::East => &mut exits.east,
+            Direction::South => &mut exits.south,
+        };
+        let (updated_target, cleared) = toggled_target(*current_target, target);
+        *current_target = updated_target;
+        if source == self.editor_selected {
+            self.select_editor_node(source);
+        }
+        self.message = if cleared {
+            format!("{direction} portal from {source} cleared.")
+        } else {
+            format!("{direction} portal from {source} set to {target}.")
+        };
     }
 
     fn load_editor_file(&mut self) {
@@ -534,33 +577,61 @@ impl eframe::App for PathfinderApp {
 
             match self.mode {
                 AppMode::Pathfinder => {
-                    let clicked_zone = if let Some(graph) = self.active_graph() {
+                    let interaction = if let Some(graph) = self.active_graph() {
                         draw_topology(
                             ui,
                             graph,
                             self.route.as_ref(),
                             &self.start,
                             &self.destination,
+                            self.drag_start,
                         )
                     } else {
                         ui.allocate_space(Vec2::new(ui.available_width(), 460.0));
                         None
                     };
-                    if let Some(zone) = clicked_zone {
-                        self.route = None;
-                        if self.next_click_is_start {
+                    match interaction {
+                        Some(GridInteraction::Click(zone)) => {
+                            self.drag_start = None;
+                            self.route = None;
+                            if self.next_click_is_start {
+                                self.start = zone.to_string();
+                                self.destination.clear();
+                                self.message = format!(
+                                    "Start set to zone {zone}. Click again or drag to choose a destination."
+                                );
+                                self.next_click_is_start = false;
+                            } else {
+                                self.destination = zone.to_string();
+                                self.message = format!("Destination set to zone {zone}.");
+                                self.next_click_is_start = true;
+                                self.find_route();
+                            }
+                        }
+                        Some(GridInteraction::DragStarted(zone)) => {
+                            self.drag_start = Some(zone);
                             self.start = zone.to_string();
                             self.destination.clear();
-                            self.message = format!(
-                                "Start set to zone {zone}. Click the grid again to choose a destination."
-                            );
+                            self.route = None;
                             self.next_click_is_start = false;
-                        } else {
-                            self.destination = zone.to_string();
-                            self.message = format!("Destination set to zone {zone}.");
-                            self.next_click_is_start = true;
-                            self.find_route();
+                            self.message = format!("Dragging from zone {zone}…");
                         }
+                        Some(GridInteraction::DragEnded(Some(zone))) => {
+                            if let Some(start) = self.drag_start.take() {
+                                self.start = start.to_string();
+                                self.destination = zone.to_string();
+                                self.next_click_is_start = true;
+                                self.message = format!(
+                                    "Route from zone {start} to zone {zone}."
+                                );
+                                self.find_route();
+                            }
+                        }
+                        Some(GridInteraction::DragEnded(None)) => {
+                            self.drag_start = None;
+                            self.next_click_is_start = true;
+                        }
+                        None => {}
                     }
 
                     ui.separator();
@@ -620,7 +691,7 @@ impl eframe::App for PathfinderApp {
                     });
 
                     ui.label("Zone IDs encode X then Y (for example, 12 is X=1, Y=2).");
-                    ui.label("Click the grid to choose start, then destination; pathfinding runs automatically.");
+                    ui.label("Click twice to choose start and destination, or drag from start to destination.");
                     ui.label(&self.message);
                     if let Some(route) = &self.route {
                         ui.horizontal_wrapped(|ui| {
@@ -658,15 +729,48 @@ impl eframe::App for PathfinderApp {
                     }
                 }
                 AppMode::Editor => {
-                    let clicked_node =
-                        draw_editor_grid(ui, &self.editor_graph, self.editor_selected);
-                    if let Some(zone) = clicked_node {
-                        self.select_editor_node(zone);
+                    let interaction = draw_editor_grid(
+                        ui,
+                        &self.editor_graph,
+                        self.editor_selected,
+                        self.editor_drag,
+                    );
+                    match interaction {
+                        Some(EditorGridInteraction::NodeClicked(zone)) => {
+                            if let Some((source, direction)) = self.editor_pending_target.take() {
+                                self.set_editor_target(source, direction, zone);
+                            } else {
+                                self.select_editor_node(zone);
+                            }
+                        }
+                        Some(EditorGridInteraction::HandleClicked(source, direction)) => {
+                            self.select_editor_node(source);
+                            self.editor_pending_target = Some((source, direction));
+                            self.message = format!(
+                                "Click a destination tile for the {direction} portal from {source}, or drag the handle there."
+                            );
+                        }
+                        Some(EditorGridInteraction::HandleDragStarted(source, direction)) => {
+                            self.select_editor_node(source);
+                            self.editor_pending_target = None;
+                            self.editor_drag = Some((source, direction));
+                            self.message =
+                                format!("Dragging the {direction} portal from {source}…");
+                        }
+                        Some(EditorGridInteraction::HandleDragEnded(Some(target))) => {
+                            if let Some((source, direction)) = self.editor_drag.take() {
+                                self.set_editor_target(source, direction, target);
+                            }
+                        }
+                        Some(EditorGridInteraction::HandleDragEnded(None)) => {
+                            self.editor_drag = None;
+                        }
+                        None => {}
                     }
 
                     ui.separator();
                     ui.label("5×5 map editor grid; click a node to configure its portals.");
-                    ui.label("Select a node, enter its portal destination zone IDs, then save a map.");
+                    ui.label("Select a node, configure portals with its edge handles or target fields, then save.");
                     let selected_editor_name = self
                         .editor_file_selection
                         .and_then(|index| self.files.get(index))
@@ -711,6 +815,8 @@ impl eframe::App for PathfinderApp {
                             self.editor_filename.clear();
                             self.editor_file_selection = None;
                             self.editor_loaded_file = None;
+                            self.editor_pending_target = None;
+                            self.editor_drag = None;
                             self.editor_targets = std::array::from_fn(|_| "0".to_owned());
                             self.message = "Started a new empty 5×5 map.".to_owned();
                         }
@@ -825,6 +931,14 @@ fn zone_coordinates(zone: u64) -> Option<(usize, usize)> {
     }
 }
 
+fn toggled_target(current: u64, target: u64) -> (u64, bool) {
+    if current == target {
+        (0, true)
+    } else {
+        (target, false)
+    }
+}
+
 fn empty_map() -> BTreeMap<u64, PortalExits> {
     (1..=GRID_SIZE)
         .flat_map(|x| (1..=GRID_SIZE).map(move |y| (x * 10 + y) as u64))
@@ -900,10 +1014,11 @@ fn draw_editor_grid(
     ui: &mut egui::Ui,
     graph: &BTreeMap<u64, PortalExits>,
     selected: u64,
-) -> Option<u64> {
+    active_drag: Option<(u64, Direction)>,
+) -> Option<EditorGridInteraction> {
     let area_width = ui.available_width().max(320.0).min(760.0);
     let area_size = Vec2::new(area_width, 400.0);
-    let (rect, response) = ui.allocate_exact_size(area_size, Sense::click());
+    let (rect, response) = ui.allocate_exact_size(area_size, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
     let grid_rect = egui::Rect::from_min_max(
         Pos2::new(rect.left() + 36.0, rect.top() + 22.0),
@@ -917,6 +1032,16 @@ fn draw_editor_grid(
             grid_rect.left() + (x as f32 - 0.5) * cell_width,
             grid_rect.top() + (y as f32 - 0.5) * cell_height,
         ))
+    };
+    let handle_position = |zone: u64, direction: Direction| -> Option<Pos2> {
+        let center = position(zone)?;
+        let offset = match direction {
+            Direction::West => Vec2::new(-cell_width / 2.0, 0.0),
+            Direction::North => Vec2::new(0.0, -cell_height / 2.0),
+            Direction::East => Vec2::new(cell_width / 2.0, 0.0),
+            Direction::South => Vec2::new(0.0, cell_height / 2.0),
+        };
+        Some(center + offset)
     };
 
     let grid_color = Color32::from_gray(215);
@@ -962,14 +1087,20 @@ fn draw_editor_grid(
     }
 
     for (source, exits) in graph {
-        let Some(source_position) = position(*source) else {
-            continue;
-        };
-        for (_, destination) in exits.iter() {
+        for (direction, destination) in exits.iter() {
+            let Some(source_handle) = handle_position(*source, direction) else {
+                continue;
+            };
             let Some(destination_position) = position(destination) else {
                 continue;
             };
-            draw_edge(&painter, source_position, destination_position, false);
+            draw_edge_from_handle(
+                &painter,
+                source_handle,
+                destination_position,
+                *source == selected,
+                19.0,
+            );
         }
     }
 
@@ -994,15 +1125,92 @@ fn draw_editor_grid(
         );
     }
 
+    let handles = [
+        Direction::West,
+        Direction::North,
+        Direction::East,
+        Direction::South,
+    ];
+    for direction in handles {
+        if let Some(handle_position) = handle_position(selected, direction) {
+            let active = active_drag == Some((selected, direction));
+            let fill = if active {
+                Color32::from_rgb(255, 190, 60)
+            } else {
+                Color32::from_rgb(245, 245, 250)
+            };
+            painter.circle_filled(handle_position, 9.0, fill);
+            painter.circle_stroke(
+                handle_position,
+                9.0,
+                Stroke::new(2.0_f32, Color32::from_rgb(35, 45, 65)),
+            );
+        }
+    }
+
+    if response.dragged()
+        && let (Some((source, direction)), Some(pointer)) =
+            (active_drag, response.interact_pointer_pos())
+        && let Some(handle) = handle_position(source, direction)
+    {
+        draw_edge_from_handle(&painter, handle, pointer, true, 0.0);
+    }
+
+    if response.drag_started()
+        && let Some(pointer) = ui.ctx().input(|input| input.pointer.press_origin())
+        && let Some(direction) = handles.into_iter().find(|direction| {
+            handle_position(selected, *direction)
+                .is_some_and(|handle| handle.distance(pointer) <= 12.0)
+        })
+    {
+        return Some(EditorGridInteraction::HandleDragStarted(
+            selected, direction,
+        ));
+    }
+    let primary_released = ui
+        .ctx()
+        .input(|input| input.pointer.button_released(egui::PointerButton::Primary));
+    if active_drag.is_some() && (response.drag_stopped() || primary_released) {
+        let pointer = response.interact_pointer_pos().or_else(|| {
+            ui.ctx()
+                .input(|input| input.pointer.interact_pos().or(input.pointer.latest_pos()))
+        });
+        let target = pointer
+            .and_then(|pointer| zone_at_position(grid_rect, cell_width, cell_height, pointer));
+        return Some(EditorGridInteraction::HandleDragEnded(target));
+    }
     if response.clicked()
         && let Some(pointer) = response.interact_pointer_pos()
-        && grid_rect.contains(pointer)
     {
-        let x = ((pointer.x - grid_rect.left()) / cell_width).floor() as u64 + 1;
-        let y = ((pointer.y - grid_rect.top()) / cell_height).floor() as u64 + 1;
-        return Some(x * 10 + y);
+        if let Some(direction) = handles.into_iter().find(|direction| {
+            handle_position(selected, *direction)
+                .is_some_and(|handle| handle.distance(pointer) <= 12.0)
+        }) {
+            return Some(EditorGridInteraction::HandleClicked(selected, direction));
+        }
+        if let Some(zone) = zone_at_position(grid_rect, cell_width, cell_height, pointer) {
+            return Some(EditorGridInteraction::NodeClicked(zone));
+        }
     }
     None
+}
+
+fn zone_at_position(
+    grid_rect: egui::Rect,
+    cell_width: f32,
+    cell_height: f32,
+    position: Pos2,
+) -> Option<u64> {
+    if !grid_rect.contains(position) {
+        return None;
+    }
+    let x = ((position.x - grid_rect.left()) / cell_width).floor() as u64 + 1;
+    let y = ((position.y - grid_rect.top()) / cell_height).floor() as u64 + 1;
+    if (1..=GRID_SIZE as u64).contains(&x) && (1..=GRID_SIZE as u64).contains(&y) {
+        Some(x * 10 + y)
+    } else {
+        None
+    }
 }
 
 fn draw_topology(
@@ -1011,10 +1219,11 @@ fn draw_topology(
     route: Option<&Route>,
     start_text: &str,
     destination_text: &str,
-) -> Option<u64> {
+    drag_start: Option<u64>,
+) -> Option<GridInteraction> {
     let area_width = ui.available_width().max(320.0).min(760.0);
     let area_size = Vec2::new(area_width, 460.0);
-    let (rect, response) = ui.allocate_exact_size(area_size, Sense::click());
+    let (rect, response) = ui.allocate_exact_size(area_size, Sense::click_and_drag());
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -1105,6 +1314,14 @@ fn draw_topology(
         }
     }
 
+    if response.dragged()
+        && let (Some(start), Some(pointer)) = (drag_start, response.interact_pointer_pos())
+        && let Some(start_position) = position(start)
+        && grid_rect.contains(pointer)
+    {
+        draw_edge(&painter, start_position, pointer, true);
+    }
+
     let start = parse_zone(start_text, "").ok();
     let destination = parse_zone(destination_text, "").ok();
     for zone in graph.keys() {
@@ -1137,21 +1354,76 @@ fn draw_topology(
         );
     }
 
+    if response.drag_started()
+        && let Some(pointer) = response.interact_pointer_pos()
+        && let Some(zone) = zone_at_position(grid_rect, cell_width, cell_height, pointer)
+    {
+        return Some(GridInteraction::DragStarted(zone));
+    }
+    if response.drag_stopped() {
+        let zone = response
+            .interact_pointer_pos()
+            .and_then(|pointer| zone_at_position(grid_rect, cell_width, cell_height, pointer));
+        return Some(GridInteraction::DragEnded(zone));
+    }
     if response.clicked()
         && let Some(pointer) = response.interact_pointer_pos()
-        && grid_rect.contains(pointer)
+        && let Some(zone) = zone_at_position(grid_rect, cell_width, cell_height, pointer)
     {
-        let x = ((pointer.x - grid_rect.left()) / cell_width).floor() as u64 + 1;
-        let y = ((pointer.y - grid_rect.top()) / cell_height).floor() as u64 + 1;
-        return Some(x * 10 + y);
+        return Some(GridInteraction::Click(zone));
     }
     None
 }
 
 fn draw_edge(painter: &egui::Painter, source: Pos2, destination: Pos2, highlighted: bool) {
+    draw_edge_with_source_inset(painter, source, destination, highlighted, 18.0);
+}
+
+fn draw_edge_from_handle(
+    painter: &egui::Painter,
+    source: Pos2,
+    destination: Pos2,
+    highlighted: bool,
+    destination_inset: f32,
+) {
+    draw_edge_with_insets(
+        painter,
+        source,
+        destination,
+        highlighted,
+        0.0,
+        destination_inset,
+    );
+}
+
+fn draw_edge_with_source_inset(
+    painter: &egui::Painter,
+    source: Pos2,
+    destination: Pos2,
+    highlighted: bool,
+    source_inset: f32,
+) {
+    draw_edge_with_insets(
+        painter,
+        source,
+        destination,
+        highlighted,
+        source_inset,
+        19.0,
+    );
+}
+
+fn draw_edge_with_insets(
+    painter: &egui::Painter,
+    source: Pos2,
+    destination: Pos2,
+    highlighted: bool,
+    source_inset: f32,
+    destination_inset: f32,
+) {
     let delta = destination - source;
     let length = delta.length();
-    if length < 36.0 {
+    if length < source_inset + destination_inset + 8.0 {
         return;
     }
     let unit = delta / length;
@@ -1161,16 +1433,18 @@ fn draw_edge(painter: &egui::Painter, source: Pos2, destination: Pos2, highlight
         Color32::from_gray(145)
     };
     let stroke = Stroke::new(if highlighted { 3.0_f32 } else { 1.3_f32 }, color);
-    let start = source + unit * 18.0;
-    let end = destination - unit * 19.0;
-    painter.line_segment([start, end], stroke);
-
+    let start = source + unit * source_inset;
+    let end = destination - unit * destination_inset;
     let perpendicular = Vec2::new(-unit.y, unit.x);
+    let head_length = 8.0;
+    let head_half_width = 4.0;
+    let head_base = end - unit * head_length;
+    painter.line_segment([start, head_base], stroke);
     painter.add(egui::Shape::convex_polygon(
         vec![
             end,
-            end - unit * 8.0 + perpendicular * 4.0,
-            end - unit * 8.0 - perpendicular * 4.0,
+            head_base + perpendicular * head_half_width,
+            head_base - perpendicular * head_half_width,
         ],
         color,
         Stroke::NONE,
@@ -1192,7 +1466,8 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::{
-        complete_grid, empty_map, ensure_portal_directory, json_filename, zone_coordinates,
+        Pos2, Vec2, complete_grid, egui, empty_map, ensure_portal_directory, json_filename,
+        toggled_target, zone_at_position, zone_coordinates,
     };
     use std::{
         fs,
@@ -1204,6 +1479,19 @@ mod tests {
         assert_eq!(zone_coordinates(12), Some((1, 2)));
         assert_eq!(zone_coordinates(55), Some((5, 5)));
         assert_eq!(zone_coordinates(60), None);
+    }
+
+    #[test]
+    fn pointer_positions_map_to_grid_zones_and_reject_outside_points() {
+        let grid = egui::Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(500.0, 500.0));
+        assert_eq!(
+            zone_at_position(grid, 100.0, 100.0, Pos2::new(150.0, 250.0)),
+            Some(23)
+        );
+        assert_eq!(
+            zone_at_position(grid, 100.0, 100.0, Pos2::new(500.0, 250.0)),
+            None
+        );
     }
 
     #[test]
@@ -1235,6 +1523,12 @@ mod tests {
         let json = serde_json::to_value(graph).unwrap();
         assert_eq!(json["12"]["north"], 22);
         assert_eq!(json["12"]["west"], 0);
+    }
+
+    #[test]
+    fn dragging_to_the_current_target_clears_that_direction() {
+        assert_eq!(toggled_target(33, 33), (0, true));
+        assert_eq!(toggled_target(33, 44), (44, false));
     }
 
     #[test]

@@ -16,7 +16,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Verify tag matches package version
         run: |
-          package_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "windowtesting") | .version')"
+          package_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "portal-solver") | .version')"
           test "$GITHUB_REF_NAME" = "v$package_version"
       - name: Install native build dependencies
         run: |
@@ -37,7 +37,7 @@ jobs:
       - name: Build release binary
         run: |
           cargo build --release
-          install -m 755 target/release/windowtesting portal-solver-linux-x86_64
+          install -m 755 target/release/portal-solver portal-solver-linux-x86_64
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

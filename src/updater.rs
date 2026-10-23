@@ -171,6 +171,7 @@ fn download_update(url: &str, temporary: &Path, executable: &Path) -> Result<(),
     }
 
     let mut file = OpenOptions::new()
+        .read(true)
         .write(true)
         .create_new(true)
         .open(temporary)
@@ -243,7 +244,12 @@ fn remove_temporary(path: &PathBuf, original_error: &str) -> Result<(), String> 
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_version, release_asset_name};
+    use super::{parse_version, release_asset_name, validate_elf};
+    use std::{
+        fs::{self, OpenOptions},
+        io::Write,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn parses_version_tags_with_or_without_v_prefix() {
@@ -258,5 +264,32 @@ mod tests {
             release_asset_name(),
             format!("portal-solver-linux-{}", std::env::consts::ARCH)
         );
+    }
+
+    #[test]
+    fn validates_elf_header_on_read_write_download_file() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "portal-solver-elf-test-{}-{unique}",
+            std::process::id()
+        ));
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let mut header = [0_u8; 20];
+        header[..6].copy_from_slice(b"\x7fELF\x02\x01");
+        header[18..20].copy_from_slice(&62_u16.to_le_bytes());
+        file.write_all(&header).unwrap();
+
+        assert!(validate_elf(&mut file).is_ok());
+
+        drop(file);
+        fs::remove_file(path).unwrap();
     }
 }

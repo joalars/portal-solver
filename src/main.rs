@@ -1,8 +1,9 @@
+mod map;
+mod map_migrations;
 mod pathfinding;
 mod updater;
 
 use std::{
-    collections::BTreeMap,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -12,13 +13,12 @@ use std::{
 };
 
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Sense, Stroke, Vec2};
+use map::{MapLayout, PortalMap};
 use pathfinding::{Direction, PortalExits, Route, shortest_path};
-
-const GRID_SIZE: usize = 5;
 
 struct PortalFile {
     name: String,
-    graph: Result<BTreeMap<u64, PortalExits>, String>,
+    map: Result<PortalMap, String>,
 }
 
 enum GridInteraction {
@@ -44,14 +44,17 @@ struct PathfinderApp {
     mode: AppMode,
     next_click_is_start: bool,
     drag_start: Option<u64>,
-    editor_graph: BTreeMap<u64, PortalExits>,
+    editor_map: PortalMap,
     editor_selected: u64,
+    editor_cell_id: String,
     editor_targets: [String; 4],
     editor_pending_target: Option<(u64, Direction)>,
     editor_drag: Option<(u64, Direction)>,
     editor_filename: String,
     editor_file_selection: Option<usize>,
     editor_loaded_file: Option<String>,
+    editor_width: usize,
+    editor_height: usize,
     update_sender: Sender<UpdateEvent>,
     update_receiver: Receiver<UpdateEvent>,
     update_busy: bool,
@@ -84,14 +87,17 @@ impl PathfinderApp {
             mode: AppMode::Pathfinder,
             next_click_is_start: true,
             drag_start: None,
-            editor_graph: empty_map(),
+            editor_map: PortalMap::new_grid(5, 5).expect("default grid dimensions are valid"),
             editor_selected: 11,
+            editor_cell_id: "11".to_owned(),
             editor_targets: std::array::from_fn(|_| "0".to_owned()),
             editor_pending_target: None,
             editor_drag: None,
             editor_filename: String::new(),
             editor_file_selection: None,
             editor_loaded_file: None,
+            editor_width: 5,
+            editor_height: 5,
             update_sender,
             update_receiver,
             update_busy: false,
@@ -138,10 +144,12 @@ impl PathfinderApp {
                     self.update_busy = false;
                 }
                 UpdateEvent::Checked(Ok(None)) => {
+                    self.available_update = None;
                     self.update_status.clear();
                     self.update_busy = false;
                 }
                 UpdateEvent::Checked(Err(error)) => {
+                    self.available_update = None;
                     self.update_status = error;
                     self.update_busy = false;
                 }
@@ -161,11 +169,7 @@ impl PathfinderApp {
     }
 
     fn reload_files(&mut self) {
-        self.route = None;
-        self.start.clear();
-        self.destination.clear();
-        self.next_click_is_start = true;
-        self.drag_start = None;
+        self.clear_path_selection();
         match find_portal_directory() {
             Ok(directory) => match fs::read_dir(&directory) {
                 Ok(entries) => {
@@ -203,27 +207,37 @@ impl PathfinderApp {
         }
     }
 
+    fn clear_path_selection(&mut self) {
+        self.route = None;
+        self.start.clear();
+        self.destination.clear();
+        self.next_click_is_start = true;
+        self.drag_start = None;
+        self.message.clear();
+    }
+
     fn find_route(&mut self) {
         self.route = None;
         let Some(index) = self.selected_file else {
             self.message = "Select a portal JSON file first.".to_owned();
             return;
         };
-        let graph = match &self.files[index].graph {
-            Ok(graph) => graph,
+        let map = match &self.files[index].map {
+            Ok(map) => map,
             Err(error) => {
                 self.message = format!("Cannot use this file: {error}");
                 return;
             }
         };
-        let start = match parse_zone(&self.start, "Starting position") {
+        let graph = map.graph();
+        let start = match parse_cell_id(&self.start, "Starting cell") {
             Ok(zone) => zone,
             Err(error) => {
                 self.message = error;
                 return;
             }
         };
-        let destination = match parse_zone(&self.destination, "Destination") {
+        let destination = match parse_cell_id(&self.destination, "Destination") {
             Ok(zone) => zone,
             Err(error) => {
                 self.message = error;
@@ -231,20 +245,20 @@ impl PathfinderApp {
             }
         };
         if !graph.contains_key(&start) {
-            self.message = format!("Starting zone {start} is not in this file.");
+            self.message = format!("Starting cell {start} is not in this file.");
             return;
         }
         if !graph.contains_key(&destination) {
-            self.message = format!("Destination zone {destination} is not in this file.");
+            self.message = format!("Destination cell {destination} is not in this file.");
             return;
         }
-        match shortest_path(graph, start, destination) {
+        match shortest_path(&graph, start, destination) {
             Some(route) => {
                 self.message = if route.directions.is_empty() {
-                    format!("Already at destination zone {destination}.")
+                    format!("Already at destination cell {destination}.")
                 } else {
                     format!(
-                        "Shortest route: {} portal(s), {} zone(s).",
+                        "Shortest route: {} portal(s), {} cell(s).",
                         route.directions.len(),
                         route.zones.len()
                     )
@@ -252,20 +266,21 @@ impl PathfinderApp {
                 self.route = Some(route);
             }
             None => {
-                self.message = format!("No route from zone {start} to zone {destination}.");
+                self.message = format!("No route from cell {start} to cell {destination}.");
             }
         }
     }
 
-    fn active_graph(&self) -> Option<&BTreeMap<u64, PortalExits>> {
+    fn active_map(&self) -> Option<&PortalMap> {
         self.selected_file
             .and_then(|index| self.files.get(index))
-            .and_then(|file| file.graph.as_ref().ok())
+            .and_then(|file| file.map.as_ref().ok())
     }
 
     fn select_editor_node(&mut self, zone: u64) {
         self.editor_selected = zone;
-        let exits = &self.editor_graph[&zone];
+        self.editor_cell_id = zone.to_string();
+        let exits = &self.editor_map.cells[&zone].exits;
         self.editor_targets = [
             exits.west.to_string(),
             exits.north.to_string(),
@@ -275,7 +290,11 @@ impl PathfinderApp {
     }
 
     fn set_editor_target(&mut self, source: u64, direction: Direction, target: u64) {
-        let exits = self.editor_graph.entry(source).or_default();
+        let Some(cell) = self.editor_map.cells.get_mut(&source) else {
+            self.message = format!("Cell {source} no longer exists.");
+            return;
+        };
+        let exits = &mut cell.exits;
         let current_target = match direction {
             Direction::West => &mut exits.west,
             Direction::North => &mut exits.north,
@@ -294,6 +313,28 @@ impl PathfinderApp {
         };
     }
 
+    fn rename_selected_graph_cell(&mut self) {
+        let old_id = self.editor_selected;
+        let new_id = match self.editor_cell_id.trim().parse::<u64>() {
+            Ok(id) => id,
+            Err(_) => {
+                self.message = "Cell ID must be a positive number.".to_owned();
+                return;
+            }
+        };
+        match self
+            .editor_map
+            .rename_graph_cell(self.editor_selected, new_id)
+        {
+            Ok(()) => {
+                self.select_editor_node(new_id);
+                self.message =
+                    format!("Renamed cell {old_id} to {new_id}; portal references were updated.");
+            }
+            Err(error) => self.message = error,
+        }
+    }
+
     fn load_editor_file(&mut self) {
         let Some(index) = self.editor_file_selection else {
             self.message = "Select a valid portal map to load.".to_owned();
@@ -305,22 +346,30 @@ impl PathfinderApp {
             return;
         };
         let name = file.name.clone();
-        let mut graph = match &file.graph {
-            Ok(graph) => graph.clone(),
+        let mut map = match &file.map {
+            Ok(map) => map.clone(),
             Err(error) => {
                 self.message = format!("Cannot edit this file: {error}");
                 return;
             }
         };
-        if graph.keys().any(|zone| zone_coordinates(*zone).is_none()) {
-            self.message =
-                "Cannot edit this map: all zone IDs must be within the 5×5 grid (11–55)."
-                    .to_owned();
-            return;
+        if let Some((width, height)) = map.grid_dimensions() {
+            if let Err(error) = map.resize_grid(width, height) {
+                self.message = error;
+                return;
+            }
+            self.editor_width = width;
+            self.editor_height = height;
         }
-        graph = complete_grid(graph);
-        self.editor_graph = graph;
-        self.editor_selected = 11;
+        self.editor_map = map;
+        self.editor_selected = self.editor_map.cells.keys().next().copied().unwrap_or(0);
+        if self.editor_selected == 0 && matches!(&self.editor_map.layout, MapLayout::Graph) {
+            if let Err(error) = self.editor_map.add_graph_cell() {
+                self.message = error;
+                return;
+            }
+            self.editor_selected = 11;
+        }
         self.select_editor_node(self.editor_selected);
         self.editor_filename = name.clone();
         self.editor_loaded_file = Some(name.clone());
@@ -334,28 +383,26 @@ impl PathfinderApp {
             if value.is_empty() {
                 continue;
             }
-            let target = value.parse::<u64>().map_err(|_| {
-                format!("Target '{}' must be a zone ID from 11 to 55, or 0.", value)
-            })?;
+            let target = value
+                .parse::<u64>()
+                .map_err(|_| format!("Target '{}' must be a numeric cell ID, or 0.", value))?;
             if target == 0 {
                 continue;
             }
-            if zone_coordinates(target).is_none() {
-                return Err(format!(
-                    "Target {target} is outside the 5×5 grid; enter 11–55 with X and Y from 1 to 5."
-                ));
+            if !self.editor_map.cells.contains_key(&target) {
+                return Err(format!("Target cell {target} does not exist in this map."));
             }
             targets[index] = target;
         }
-        self.editor_graph.insert(
-            self.editor_selected,
-            PortalExits {
-                west: targets[0],
-                north: targets[1],
-                east: targets[2],
-                south: targets[3],
-            },
-        );
+        let Some(cell) = self.editor_map.cells.get_mut(&self.editor_selected) else {
+            return Err("Select an existing cell before editing its portals.".to_owned());
+        };
+        cell.exits = PortalExits {
+            west: targets[0],
+            north: targets[1],
+            east: targets[2],
+            south: targets[3],
+        };
         Ok(())
     }
 
@@ -368,6 +415,10 @@ impl PathfinderApp {
             self.message = error;
             return;
         }
+        if let Err(error) = self.editor_map.validate() {
+            self.message = error;
+            return;
+        }
         let directory = match find_portal_directory() {
             Ok(directory) => directory,
             Err(error) => {
@@ -376,7 +427,7 @@ impl PathfinderApp {
             }
         };
         let path = directory.join(&filename);
-        let contents = match serde_json::to_vec_pretty(&self.editor_graph) {
+        let contents = match serde_json::to_vec_pretty(&self.editor_map) {
             Ok(contents) => contents,
             Err(error) => {
                 self.message = format!("Could not encode portal map: {error}");
@@ -414,7 +465,11 @@ impl PathfinderApp {
             }
         };
         let path = directory.join(&filename);
-        let contents = match serde_json::to_vec_pretty(&self.editor_graph) {
+        if let Err(error) = self.editor_map.validate() {
+            self.message = error;
+            return;
+        }
+        let contents = match serde_json::to_vec_pretty(&self.editor_map) {
             Ok(contents) => contents,
             Err(error) => {
                 self.message = format!("Could not encode portal map: {error}");
@@ -465,19 +520,13 @@ impl PortalFile {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
-        let graph = fs::read_to_string(path)
+        let map = fs::read_to_string(path)
             .map_err(|error| format!("Could not read {}: {error}", path.display()))
             .and_then(|contents| {
-                serde_json::from_str::<BTreeMap<u64, PortalExits>>(&contents)
-                    .map_err(|error| format!("Invalid JSON in {}: {error}", path.display()))
-            })
-            .and_then(|graph| {
-                pathfinding::validate_graph(&graph).map_err(|error| {
-                    format!("Invalid portal data in {}: {error}", path.display())
-                })?;
-                Ok(graph)
+                PortalMap::from_json(&contents)
+                    .map_err(|error| format!("Invalid portal data in {}: {error}", path.display()))
             });
-        Self { name, graph }
+        Self { name, map }
     }
 }
 
@@ -527,11 +576,11 @@ fn ensure_portal_directory(directory: &Path) -> Result<PathBuf, String> {
     Ok(directory.to_path_buf())
 }
 
-fn parse_zone(value: &str, label: &str) -> Result<u64, String> {
+fn parse_cell_id(value: &str, label: &str) -> Result<u64, String> {
     value
         .trim()
         .parse()
-        .map_err(|_| format!("{label} must be a numeric zone ID, e.g. 12 for X=1, Y=2."))
+        .map_err(|_| format!("{label} must be a numeric cell ID."))
 }
 
 impl eframe::App for PathfinderApp {
@@ -542,7 +591,10 @@ impl eframe::App for PathfinderApp {
         context.set_visuals(visuals);
 
         egui::CentralPanel::default().show(context, |ui| {
-            ui.heading("Portal Path Finder");
+            ui.horizontal(|ui| {
+                ui.heading("Portal Path Finder");
+                ui.label(format!("v{}", env!("CARGO_PKG_VERSION")));
+            });
             ui.horizontal(|ui| {
                 if let Some(release) = &self.available_update {
                     let label = format!("Install {} and restart", release.version);
@@ -577,10 +629,10 @@ impl eframe::App for PathfinderApp {
 
             match self.mode {
                 AppMode::Pathfinder => {
-                    let interaction = if let Some(graph) = self.active_graph() {
+                    let interaction = if let Some(map) = self.active_map() {
                         draw_topology(
                             ui,
-                            graph,
+                            map,
                             self.route.as_ref(),
                             &self.start,
                             &self.destination,
@@ -598,12 +650,12 @@ impl eframe::App for PathfinderApp {
                                 self.start = zone.to_string();
                                 self.destination.clear();
                                 self.message = format!(
-                                    "Start set to zone {zone}. Click again or drag to choose a destination."
+                                    "Start set to cell {zone}. Click again or drag to choose a destination."
                                 );
                                 self.next_click_is_start = false;
                             } else {
                                 self.destination = zone.to_string();
-                                self.message = format!("Destination set to zone {zone}.");
+                                self.message = format!("Destination set to cell {zone}.");
                                 self.next_click_is_start = true;
                                 self.find_route();
                             }
@@ -614,7 +666,7 @@ impl eframe::App for PathfinderApp {
                             self.destination.clear();
                             self.route = None;
                             self.next_click_is_start = false;
-                            self.message = format!("Dragging from zone {zone}…");
+                            self.message = format!("Dragging from cell {zone}…");
                         }
                         Some(GridInteraction::DragEnded(Some(zone))) => {
                             if let Some(start) = self.drag_start.take() {
@@ -622,7 +674,7 @@ impl eframe::App for PathfinderApp {
                                 self.destination = zone.to_string();
                                 self.next_click_is_start = true;
                                 self.message = format!(
-                                    "Route from zone {start} to zone {zone}."
+                                    "Route from cell {start} to cell {zone}."
                                 );
                                 self.find_route();
                             }
@@ -635,8 +687,16 @@ impl eframe::App for PathfinderApp {
                     }
 
                     ui.separator();
-                    ui.label("5×5 coordinate grid (portal destinations may be non-adjacent):");
-                    if self.active_graph().is_none() {
+                    if let Some(map) = self.active_map() {
+                        if let Some((width, height)) = map.grid_dimensions() {
+                            ui.label(format!(
+                                "{width}×{height} grid (portal destinations may be non-adjacent):"
+                            ));
+                        } else {
+                            ui.label("Ungridged map; cells are arranged automatically.");
+                        }
+                    }
+                    if self.active_map().is_none() {
                         ui.label("Choose a valid portal file to display its topology.");
                     }
                     ui.label("Find the shortest route through directed, non-Euclidean portals.");
@@ -646,11 +706,12 @@ impl eframe::App for PathfinderApp {
                             .selected_file
                             .and_then(|index| self.files.get(index))
                             .map_or("No files found", |file| file.name.as_str());
+                        let mut file_changed = false;
                         egui::ComboBox::from_id_salt("portal_file")
                             .selected_text(selected_name)
                             .show_ui(ui, |ui| {
                                 for (index, file) in self.files.iter().enumerate() {
-                                    let label = if file.graph.is_ok() {
+                                    let label = if file.map.is_ok() {
                                         file.name.clone()
                                     } else {
                                         format!("{} (invalid)", file.name)
@@ -663,34 +724,39 @@ impl eframe::App for PathfinderApp {
                                         )
                                         .changed()
                                     {
-                                        self.route = None;
+                                        file_changed = true;
                                     }
                                 }
                             });
+                        if file_changed {
+                            self.clear_path_selection();
+                        }
                         if ui.button("Reload files").clicked() {
                             self.reload_files();
                         }
                     });
 
                     ui.horizontal(|ui| {
-                        ui.label("Starting position (X,Y):");
-                        ui.add(
+                        ui.label("Starting cell ID:");
+                        let start_response = ui.add(
                             egui::TextEdit::singleline(&mut self.start)
                                 .hint_text("e.g. 12")
                                 .desired_width(90.0),
                         );
-                        ui.label("Destination (X,Y):");
-                        ui.add(
+                        ui.label("Destination cell ID:");
+                        let destination_response = ui.add(
                             egui::TextEdit::singleline(&mut self.destination)
                                 .hint_text("e.g. 33")
                                 .desired_width(90.0),
                         );
-                        if ui.button("Find shortest path").clicked() {
+                        let submit_on_enter = should_submit_on_enter(&start_response, ui)
+                            || should_submit_on_enter(&destination_response, ui);
+                        if ui.button("Find shortest path").clicked() || submit_on_enter {
                             self.find_route();
                         }
                     });
 
-                    ui.label("Zone IDs encode X then Y (for example, 12 is X=1, Y=2).");
+                    ui.label("Enter numeric cell IDs; legacy 5×5 maps retain their original IDs.");
                     ui.label("Click twice to choose start and destination, or drag from start to destination.");
                     ui.label(&self.message);
                     if let Some(route) = &self.route {
@@ -708,7 +774,7 @@ impl eframe::App for PathfinderApp {
                             }
                         });
                         ui.label(format!(
-                            "Zones: {}",
+                            "Cells: {}",
                             route
                                 .zones
                                 .iter()
@@ -721,9 +787,9 @@ impl eframe::App for PathfinderApp {
                     if let Some(file) = self
                         .selected_file
                         .and_then(|index| self.files.get(index))
-                        .filter(|file| file.graph.is_err())
+                        .filter(|file| file.map.is_err())
                     {
-                        if let Err(error) = &file.graph {
+                        if let Err(error) = &file.map {
                             ui.colored_label(Color32::from_rgb(255, 125, 125), error);
                         }
                     }
@@ -731,7 +797,7 @@ impl eframe::App for PathfinderApp {
                 AppMode::Editor => {
                     let interaction = draw_editor_grid(
                         ui,
-                        &self.editor_graph,
+                        &self.editor_map,
                         self.editor_selected,
                         self.editor_drag,
                     );
@@ -769,8 +835,14 @@ impl eframe::App for PathfinderApp {
                     }
 
                     ui.separator();
-                    ui.label("5×5 map editor grid; click a node to configure its portals.");
-                    ui.label("Select a node, configure portals with its edge handles or target fields, then save.");
+                    if let Some((width, height)) = self.editor_map.grid_dimensions() {
+                        ui.label(format!(
+                            "{width}×{height} map grid; click a cell to configure its portals."
+                        ));
+                    } else {
+                        ui.label("Ungridged map; cells are arranged automatically.");
+                    }
+                    ui.label("Select a cell, configure portals with its edge handles or target fields, then save.");
                     let selected_editor_name = self
                         .editor_file_selection
                         .and_then(|index| self.files.get(index))
@@ -782,7 +854,7 @@ impl eframe::App for PathfinderApp {
                             .selected_text(selected_editor_name)
                             .show_ui(ui, |ui| {
                                 for (index, file) in self.files.iter().enumerate() {
-                                    let label = if file.graph.is_ok() {
+                                    let label = if file.map.is_ok() {
                                         file.name.clone()
                                     } else {
                                         format!("{} (invalid)", file.name)
@@ -807,49 +879,148 @@ impl eframe::App for PathfinderApp {
                         self.load_editor_file();
                     }
                     ui.horizontal(|ui| {
-                        ui.label("Selected node:");
+                        ui.label("Selected cell:");
                         ui.strong(self.editor_selected.to_string());
-                        if ui.button("New empty map").clicked() {
-                            self.editor_graph = empty_map();
+                        if ui.button("New 5×5 grid").clicked() {
+                            self.editor_map =
+                                PortalMap::new_grid(5, 5).expect("default grid dimensions are valid");
                             self.editor_selected = 11;
+                            self.editor_width = 5;
+                            self.editor_height = 5;
+                            self.editor_filename.clear();
+                            self.editor_file_selection = None;
+                            self.editor_loaded_file = None;
+                            self.editor_pending_target = None;
+                            self.editor_drag = None;
+                            self.select_editor_node(self.editor_selected);
+                            self.message = "Started a new 5×5 grid map.".to_owned();
+                        }
+                        if ui.button("New ungridded map").clicked() {
+                            self.editor_map = PortalMap::new_graph();
+                            self.editor_selected = 0;
                             self.editor_filename.clear();
                             self.editor_file_selection = None;
                             self.editor_loaded_file = None;
                             self.editor_pending_target = None;
                             self.editor_drag = None;
                             self.editor_targets = std::array::from_fn(|_| "0".to_owned());
-                            self.message = "Started a new empty 5×5 map.".to_owned();
+                            self.message = "Started a new ungridded map. Add cells to begin.".to_owned();
+                        }
+                        if matches!(&self.editor_map.layout, MapLayout::Graph)
+                            && ui.button("Add cell").clicked()
+                        {
+                            match self.editor_map.add_graph_cell() {
+                                Ok(id) => {
+                                    self.select_editor_node(id);
+                                    self.message = format!("Added cell {id}.");
+                                }
+                                Err(error) => self.message = error,
+                            }
+                        }
+                        if matches!(&self.editor_map.layout, MapLayout::Graph)
+                            && !self.editor_map.cells.is_empty()
+                            && ui.button("Remove selected cell").clicked()
+                        {
+                            match self.editor_map.remove_cell(self.editor_selected) {
+                                Ok(()) => {
+                                    self.editor_selected =
+                                        self.editor_map.cells.keys().next().copied().unwrap_or(0);
+                                    if self.editor_selected != 0 {
+                                        self.select_editor_node(self.editor_selected);
+                                    }
+                                    self.message = "Removed the selected cell and cleared incoming portals.".to_owned();
+                                }
+                                Err(error) => self.message = error,
+                            }
                         }
                     });
+                    if matches!(&self.editor_map.layout, MapLayout::Graph)
+                        && self.editor_selected != 0
+                    {
+                        let mut rename_cell = false;
+                        ui.horizontal(|ui| {
+                            ui.label("Cell ID:");
+                            let response = ui.add(
+                                egui::TextEdit::singleline(&mut self.editor_cell_id)
+                                    .desired_width(100.0),
+                            );
+                            let enter_pressed = should_submit_on_enter(&response, ui);
+                            rename_cell =
+                                ui.button("Rename selected cell").clicked() || enter_pressed;
+                        });
+                        if rename_cell {
+                            self.rename_selected_graph_cell();
+                        }
+                    }
+                    if self.editor_map.grid_dimensions().is_some() {
+                        let mut resize_grid = false;
+                        ui.horizontal(|ui| {
+                            ui.label("Grid size:");
+                            ui.add(
+                                egui::DragValue::new(&mut self.editor_width)
+                                    .range(1..=map::MAX_GRID_DIMENSION)
+                                    .prefix("Width "),
+                            );
+                            ui.add(
+                                egui::DragValue::new(&mut self.editor_height)
+                                    .range(1..=map::MAX_GRID_DIMENSION)
+                                    .prefix("Height "),
+                            );
+                            resize_grid = ui.button("Resize grid").clicked();
+                        });
+                        if resize_grid {
+                            match self.editor_map.resize_grid(self.editor_width, self.editor_height) {
+                                Ok(removed) => {
+                                    if !self.editor_map.cells.contains_key(&self.editor_selected) {
+                                        self.editor_selected =
+                                            self.editor_map.cells.keys().next().copied().unwrap_or(0);
+                                    }
+                                    if self.editor_selected != 0 {
+                                        self.select_editor_node(self.editor_selected);
+                                    }
+                                    self.message = format!(
+                                        "Resized grid to {}×{}; removed {removed} existing cell(s) outside the new bounds.",
+                                        self.editor_width, self.editor_height
+                                    );
+                                }
+                                Err(error) => self.message = error,
+                            }
+                        }
+                    }
 
                     ui.label(format!("Targets from node {} (0 means no portal):", self.editor_selected));
                     let mut apply_targets = false;
                     ui.horizontal(|ui| {
+                        let mut enter_pressed = false;
                         ui.label("West");
-                        ui.add(
+                        let response = ui.add(
                             egui::TextEdit::singleline(&mut self.editor_targets[0])
                                 .desired_width(56.0)
                                 .hint_text("0"),
                         );
+                        enter_pressed |= should_submit_on_enter(&response, ui);
                         ui.label("North");
-                        ui.add(
+                        let response = ui.add(
                             egui::TextEdit::singleline(&mut self.editor_targets[1])
                                 .desired_width(56.0)
                                 .hint_text("0"),
                         );
+                        enter_pressed |= should_submit_on_enter(&response, ui);
                         ui.label("East");
-                        ui.add(
+                        let response = ui.add(
                             egui::TextEdit::singleline(&mut self.editor_targets[2])
                                 .desired_width(56.0)
                                 .hint_text("0"),
                         );
+                        enter_pressed |= should_submit_on_enter(&response, ui);
                         ui.label("South");
-                        ui.add(
+                        let response = ui.add(
                             egui::TextEdit::singleline(&mut self.editor_targets[3])
                                 .desired_width(56.0)
                                 .hint_text("0"),
                         );
-                        apply_targets = ui.button("Apply targets").clicked();
+                        enter_pressed |= should_submit_on_enter(&response, ui);
+                        apply_targets = ui.button("Apply targets").clicked() || enter_pressed;
                     });
                     if apply_targets {
                         self.message = match self.apply_editor_targets() {
@@ -880,7 +1051,7 @@ impl eframe::App for PathfinderApp {
                         }
                     }
 
-                    ui.label("Targets must be zone IDs from 11 to 55; blank or 0 means no portal.");
+                    ui.label("Targets must be cell IDs in this map; blank or 0 means no portal.");
                     ui.label(&self.message);
                 }
             }
@@ -921,16 +1092,6 @@ impl eframe::App for PathfinderApp {
     }
 }
 
-fn zone_coordinates(zone: u64) -> Option<(usize, usize)> {
-    let x = zone / 10;
-    let y = zone % 10;
-    if (1..=GRID_SIZE as u64).contains(&x) && (1..=GRID_SIZE as u64).contains(&y) {
-        Some((x as usize, y as usize))
-    } else {
-        None
-    }
-}
-
 fn toggled_target(current: u64, target: u64) -> (u64, bool) {
     if current == target {
         (0, true)
@@ -939,20 +1100,8 @@ fn toggled_target(current: u64, target: u64) -> (u64, bool) {
     }
 }
 
-fn empty_map() -> BTreeMap<u64, PortalExits> {
-    (1..=GRID_SIZE)
-        .flat_map(|x| (1..=GRID_SIZE).map(move |y| (x * 10 + y) as u64))
-        .map(|zone| (zone, PortalExits::default()))
-        .collect()
-}
-
-fn complete_grid(mut graph: BTreeMap<u64, PortalExits>) -> BTreeMap<u64, PortalExits> {
-    for x in 1..=GRID_SIZE {
-        for y in 1..=GRID_SIZE {
-            graph.entry((x * 10 + y) as u64).or_default();
-        }
-    }
-    graph
+fn should_submit_on_enter(response: &egui::Response, ui: &egui::Ui) -> bool {
+    response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))
 }
 
 fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
@@ -1010,9 +1159,142 @@ fn json_filename(input: &str) -> Option<String> {
     Some(format!("{stem}.json"))
 }
 
+fn grid_cell_size(map: &PortalMap, rect: egui::Rect) -> Option<(f32, f32)> {
+    let (width, height) = map.grid_dimensions()?;
+    Some((rect.width() / width as f32, rect.height() / height as f32))
+}
+
+fn cell_position(map: &PortalMap, id: u64, rect: egui::Rect) -> Option<Pos2> {
+    let cell = map.cells.get(&id)?;
+    match &map.layout {
+        MapLayout::Grid { width, height } => {
+            let (x, y) = (cell.x?, cell.y?);
+            Some(Pos2::new(
+                rect.left() + (x as f32 - 0.5) * rect.width() / *width as f32,
+                rect.top() + (y as f32 - 0.5) * rect.height() / *height as f32,
+            ))
+        }
+        MapLayout::Graph => {
+            let count = map.cells.len();
+            let index = map.cells.keys().position(|cell_id| *cell_id == id)?;
+            if count == 1 {
+                return Some(rect.center());
+            }
+            let angle =
+                std::f32::consts::TAU * index as f32 / count as f32 - std::f32::consts::FRAC_PI_2;
+            let radius = rect.width().min(rect.height()) * 0.38;
+            Some(rect.center() + Vec2::new(angle.cos(), angle.sin()) * radius)
+        }
+    }
+}
+
+fn cell_radius(map: &PortalMap, id: u64, rect: egui::Rect) -> Option<f32> {
+    map.cells.get(&id)?;
+    match &map.layout {
+        MapLayout::Grid { .. } => {
+            let (cell_width, cell_height) = grid_cell_size(map, rect)?;
+            Some((cell_width.min(cell_height) * 0.32).clamp(6.0, 17.0))
+        }
+        MapLayout::Graph => Some(17.0),
+    }
+}
+
+fn direction_vector(direction: Direction) -> Vec2 {
+    match direction {
+        Direction::West => Vec2::new(-1.0, 0.0),
+        Direction::North => Vec2::new(0.0, -1.0),
+        Direction::East => Vec2::new(1.0, 0.0),
+        Direction::South => Vec2::new(0.0, 1.0),
+    }
+}
+
+fn handle_hit_radius(map: &PortalMap, id: u64, map_rect: egui::Rect) -> f32 {
+    if matches!(&map.layout, MapLayout::Grid { .. }) {
+        (cell_radius(map, id, map_rect).unwrap_or(17.0) * 0.55).max(7.0) + 4.0
+    } else {
+        12.0
+    }
+}
+
+fn cell_at_position(map: &PortalMap, rect: egui::Rect, point: Pos2) -> Option<u64> {
+    if !rect.contains(point) {
+        return None;
+    }
+    match &map.layout {
+        MapLayout::Grid { width, height } => {
+            let x = ((point.x - rect.left()) / rect.width() * *width as f32).floor() as usize + 1;
+            let y = ((point.y - rect.top()) / rect.height() * *height as f32).floor() as usize + 1;
+            map.cell_at(x, y)
+        }
+        MapLayout::Graph => map
+            .cells
+            .keys()
+            .filter_map(|id| cell_position(map, *id, rect).map(|center| (*id, center)))
+            .min_by(|(_, left), (_, right)| left.distance(point).total_cmp(&right.distance(point)))
+            .filter(|(_, center)| center.distance(point) <= 22.0)
+            .map(|(id, _)| id),
+    }
+}
+
+fn draw_map_grid(
+    painter: &egui::Painter,
+    map: &PortalMap,
+    outer_rect: egui::Rect,
+    map_rect: egui::Rect,
+) {
+    let MapLayout::Grid { width, height } = &map.layout else {
+        return;
+    };
+    let grid_color = Color32::from_gray(215);
+    for index in 0..=*width {
+        let x = map_rect.left() + index as f32 * map_rect.width() / *width as f32;
+        painter.line_segment(
+            [
+                Pos2::new(x, map_rect.top()),
+                Pos2::new(x, map_rect.bottom()),
+            ],
+            Stroke::new(1.0_f32, grid_color),
+        );
+    }
+    for index in 0..=*height {
+        let y = map_rect.top() + index as f32 * map_rect.height() / *height as f32;
+        painter.line_segment(
+            [
+                Pos2::new(map_rect.left(), y),
+                Pos2::new(map_rect.right(), y),
+            ],
+            Stroke::new(1.0_f32, grid_color),
+        );
+    }
+    for coordinate in 1..=*width {
+        painter.text(
+            Pos2::new(
+                map_rect.left() + (coordinate as f32 - 0.5) * map_rect.width() / *width as f32,
+                outer_rect.top() + 10.0,
+            ),
+            Align2::CENTER_CENTER,
+            coordinate.to_string(),
+            FontId::proportional(12.0),
+            Color32::from_rgb(190, 200, 218),
+        );
+    }
+    for coordinate in 1..=*height {
+        painter.text(
+            Pos2::new(
+                outer_rect.left() + 18.0,
+                map_rect.top() + (coordinate as f32 - 0.5) * map_rect.height() / *height as f32,
+            ),
+            Align2::CENTER_CENTER,
+            coordinate.to_string(),
+            FontId::proportional(12.0),
+            Color32::from_rgb(190, 200, 218),
+        );
+    }
+}
+
 fn draw_editor_grid(
     ui: &mut egui::Ui,
-    graph: &BTreeMap<u64, PortalExits>,
+    map: &PortalMap,
     selected: u64,
     active_drag: Option<(u64, Direction)>,
 ) -> Option<EditorGridInteraction> {
@@ -1020,73 +1302,33 @@ fn draw_editor_grid(
     let area_size = Vec2::new(area_width, 400.0);
     let (rect, response) = ui.allocate_exact_size(area_size, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
-    let grid_rect = egui::Rect::from_min_max(
+    let map_rect = egui::Rect::from_min_max(
         Pos2::new(rect.left() + 36.0, rect.top() + 22.0),
         Pos2::new(rect.right() - 12.0, rect.bottom() - 22.0),
     );
-    let cell_width = grid_rect.width() / GRID_SIZE as f32;
-    let cell_height = grid_rect.height() / GRID_SIZE as f32;
-    let position = |zone: u64| -> Option<Pos2> {
-        let (x, y) = zone_coordinates(zone)?;
-        Some(Pos2::new(
-            grid_rect.left() + (x as f32 - 0.5) * cell_width,
-            grid_rect.top() + (y as f32 - 0.5) * cell_height,
-        ))
-    };
-    let handle_position = |zone: u64, direction: Direction| -> Option<Pos2> {
-        let center = position(zone)?;
-        let offset = match direction {
-            Direction::West => Vec2::new(-cell_width / 2.0, 0.0),
-            Direction::North => Vec2::new(0.0, -cell_height / 2.0),
-            Direction::East => Vec2::new(cell_width / 2.0, 0.0),
-            Direction::South => Vec2::new(0.0, cell_height / 2.0),
+    draw_map_grid(&painter, map, rect, map_rect);
+    let position = |id| cell_position(map, id, map_rect);
+    let radius = |id| cell_radius(map, id, map_rect);
+    let handle_position = |id: u64, direction: Direction| -> Option<Pos2> {
+        let center = position(id)?;
+        let cell_radius = radius(id)?;
+        let offset = match &map.layout {
+            MapLayout::Grid { .. } => {
+                let (cell_width, cell_height) = grid_cell_size(map, map_rect)?;
+                match direction {
+                    Direction::West => Vec2::new(-cell_width / 2.0, 0.0),
+                    Direction::North => Vec2::new(0.0, -cell_height / 2.0),
+                    Direction::East => Vec2::new(cell_width / 2.0, 0.0),
+                    Direction::South => Vec2::new(0.0, cell_height / 2.0),
+                }
+            }
+            MapLayout::Graph => direction_vector(direction) * (cell_radius + 5.0),
         };
         Some(center + offset)
     };
 
-    let grid_color = Color32::from_gray(215);
-    for index in 0..=GRID_SIZE {
-        let x = grid_rect.left() + index as f32 * cell_width;
-        let y = grid_rect.top() + index as f32 * cell_height;
-        painter.line_segment(
-            [
-                Pos2::new(x, grid_rect.top()),
-                Pos2::new(x, grid_rect.bottom()),
-            ],
-            Stroke::new(1.0_f32, grid_color),
-        );
-        painter.line_segment(
-            [
-                Pos2::new(grid_rect.left(), y),
-                Pos2::new(grid_rect.right(), y),
-            ],
-            Stroke::new(1.0_f32, grid_color),
-        );
-    }
-    for coordinate in 1..=GRID_SIZE {
-        painter.text(
-            Pos2::new(
-                grid_rect.left() + (coordinate as f32 - 0.5) * cell_width,
-                rect.top() + 10.0,
-            ),
-            Align2::CENTER_CENTER,
-            coordinate.to_string(),
-            FontId::proportional(12.0),
-            Color32::from_rgb(190, 200, 218),
-        );
-        painter.text(
-            Pos2::new(
-                rect.left() + 18.0,
-                grid_rect.top() + (coordinate as f32 - 0.5) * cell_height,
-            ),
-            Align2::CENTER_CENTER,
-            coordinate.to_string(),
-            FontId::proportional(12.0),
-            Color32::from_rgb(190, 200, 218),
-        );
-    }
-
-    for (source, exits) in graph {
+    for (source, cell) in &map.cells {
+        let exits = &cell.exits;
         for (direction, destination) in exits.iter() {
             let Some(source_handle) = handle_position(*source, direction) else {
                 continue;
@@ -1099,27 +1341,27 @@ fn draw_editor_grid(
                 source_handle,
                 destination_position,
                 *source == selected,
-                19.0,
+                radius(destination).unwrap_or(17.0) + 2.0,
             );
         }
     }
 
-    for zone in graph.keys() {
-        let Some(node_position) = position(*zone) else {
+    for (id, cell) in &map.cells {
+        let Some(node_position) = position(*id) else {
             continue;
         };
-        let color = if *zone == selected {
+        let color = if *id == selected {
             Color32::from_rgb(235, 145, 35)
-        } else if graph[zone].iter().next().is_some() {
+        } else if cell.exits.iter().next().is_some() {
             Color32::from_rgb(65, 125, 205)
         } else {
             Color32::from_rgb(105, 115, 130)
         };
-        painter.circle_filled(node_position, 17.0, color);
+        painter.circle_filled(node_position, radius(*id).unwrap_or(17.0), color);
         painter.text(
             node_position,
             Align2::CENTER_CENTER,
-            zone.to_string(),
+            id.to_string(),
             FontId::proportional(12.0),
             Color32::WHITE,
         );
@@ -1134,15 +1376,20 @@ fn draw_editor_grid(
     for direction in handles {
         if let Some(handle_position) = handle_position(selected, direction) {
             let active = active_drag == Some((selected, direction));
+            let handle_radius = if matches!(&map.layout, MapLayout::Grid { .. }) {
+                (radius(selected).unwrap_or(17.0) * 0.55).max(4.0)
+            } else {
+                9.0
+            };
             let fill = if active {
                 Color32::from_rgb(255, 190, 60)
             } else {
                 Color32::from_rgb(245, 245, 250)
             };
-            painter.circle_filled(handle_position, 9.0, fill);
+            painter.circle_filled(handle_position, handle_radius, fill);
             painter.circle_stroke(
                 handle_position,
-                9.0,
+                handle_radius,
                 Stroke::new(2.0_f32, Color32::from_rgb(35, 45, 65)),
             );
         }
@@ -1159,8 +1406,9 @@ fn draw_editor_grid(
     if response.drag_started()
         && let Some(pointer) = ui.ctx().input(|input| input.pointer.press_origin())
         && let Some(direction) = handles.into_iter().find(|direction| {
-            handle_position(selected, *direction)
-                .is_some_and(|handle| handle.distance(pointer) <= 12.0)
+            handle_position(selected, *direction).is_some_and(|handle| {
+                handle.distance(pointer) <= handle_hit_radius(map, selected, map_rect)
+            })
         })
     {
         return Some(EditorGridInteraction::HandleDragStarted(
@@ -1175,47 +1423,29 @@ fn draw_editor_grid(
             ui.ctx()
                 .input(|input| input.pointer.interact_pos().or(input.pointer.latest_pos()))
         });
-        let target = pointer
-            .and_then(|pointer| zone_at_position(grid_rect, cell_width, cell_height, pointer));
+        let target = pointer.and_then(|pointer| cell_at_position(map, map_rect, pointer));
         return Some(EditorGridInteraction::HandleDragEnded(target));
     }
     if response.clicked()
         && let Some(pointer) = response.interact_pointer_pos()
     {
         if let Some(direction) = handles.into_iter().find(|direction| {
-            handle_position(selected, *direction)
-                .is_some_and(|handle| handle.distance(pointer) <= 12.0)
+            handle_position(selected, *direction).is_some_and(|handle| {
+                handle.distance(pointer) <= handle_hit_radius(map, selected, map_rect)
+            })
         }) {
             return Some(EditorGridInteraction::HandleClicked(selected, direction));
         }
-        if let Some(zone) = zone_at_position(grid_rect, cell_width, cell_height, pointer) {
-            return Some(EditorGridInteraction::NodeClicked(zone));
+        if let Some(id) = cell_at_position(map, map_rect, pointer) {
+            return Some(EditorGridInteraction::NodeClicked(id));
         }
     }
     None
 }
 
-fn zone_at_position(
-    grid_rect: egui::Rect,
-    cell_width: f32,
-    cell_height: f32,
-    position: Pos2,
-) -> Option<u64> {
-    if !grid_rect.contains(position) {
-        return None;
-    }
-    let x = ((position.x - grid_rect.left()) / cell_width).floor() as u64 + 1;
-    let y = ((position.y - grid_rect.top()) / cell_height).floor() as u64 + 1;
-    if (1..=GRID_SIZE as u64).contains(&x) && (1..=GRID_SIZE as u64).contains(&y) {
-        Some(x * 10 + y)
-    } else {
-        None
-    }
-}
-
 fn draw_topology(
     ui: &mut egui::Ui,
-    graph: &BTreeMap<u64, PortalExits>,
+    map: &PortalMap,
     route: Option<&Route>,
     start_text: &str,
     destination_text: &str,
@@ -1232,63 +1462,16 @@ fn draw_topology(
     let top_padding = 22.0;
     let right_padding = 12.0;
     let bottom_padding = 22.0;
-    let grid_rect = egui::Rect::from_min_max(
+    let map_rect = egui::Rect::from_min_max(
         Pos2::new(rect.left() + left_padding, rect.top() + top_padding),
         Pos2::new(rect.right() - right_padding, rect.bottom() - bottom_padding),
     );
-    let cell_width = grid_rect.width() / GRID_SIZE as f32;
-    let cell_height = grid_rect.height() / GRID_SIZE as f32;
-    let position = |zone: u64| -> Option<Pos2> {
-        let (x, y) = zone_coordinates(zone)?;
-        Some(Pos2::new(
-            grid_rect.left() + (x as f32 - 0.5) * cell_width,
-            grid_rect.top() + (y as f32 - 0.5) * cell_height,
-        ))
-    };
+    draw_map_grid(&painter, map, rect, map_rect);
+    let position = |id| cell_position(map, id, map_rect);
+    let radius = |id| cell_radius(map, id, map_rect);
+    let graph = map.graph();
 
-    let grid_color = Color32::from_gray(215);
-    for index in 0..=GRID_SIZE {
-        let x = grid_rect.left() + index as f32 * cell_width;
-        let y = grid_rect.top() + index as f32 * cell_height;
-        painter.line_segment(
-            [
-                Pos2::new(x, grid_rect.top()),
-                Pos2::new(x, grid_rect.bottom()),
-            ],
-            Stroke::new(1.0_f32, grid_color),
-        );
-        painter.line_segment(
-            [
-                Pos2::new(grid_rect.left(), y),
-                Pos2::new(grid_rect.right(), y),
-            ],
-            Stroke::new(1.0_f32, grid_color),
-        );
-    }
-    for coordinate in 1..=GRID_SIZE {
-        painter.text(
-            Pos2::new(
-                grid_rect.left() + (coordinate as f32 - 0.5) * cell_width,
-                rect.top() + 10.0,
-            ),
-            Align2::CENTER_CENTER,
-            coordinate.to_string(),
-            FontId::proportional(12.0),
-            Color32::from_rgb(190, 200, 218),
-        );
-        painter.text(
-            Pos2::new(
-                rect.left() + 18.0,
-                grid_rect.top() + (coordinate as f32 - 0.5) * cell_height,
-            ),
-            Align2::CENTER_CENTER,
-            coordinate.to_string(),
-            FontId::proportional(12.0),
-            Color32::from_rgb(190, 200, 218),
-        );
-    }
-
-    for (source, exits) in graph {
+    for (source, exits) in &graph {
         let Some(source_position) = position(*source) else {
             continue;
         };
@@ -1310,73 +1493,76 @@ fn draw_topology(
             if !highlighted {
                 continue;
             }
-            draw_edge(&painter, source_position, destination_position, highlighted);
+            draw_edge_with_insets(
+                &painter,
+                source_position,
+                destination_position,
+                highlighted,
+                radius(*source).unwrap_or(17.0),
+                radius(destination).unwrap_or(17.0) + 2.0,
+            );
         }
     }
 
     if response.dragged()
         && let (Some(start), Some(pointer)) = (drag_start, response.interact_pointer_pos())
         && let Some(start_position) = position(start)
-        && grid_rect.contains(pointer)
+        && map_rect.contains(pointer)
     {
-        draw_edge(&painter, start_position, pointer, true);
+        draw_edge_with_insets(
+            &painter,
+            start_position,
+            pointer,
+            true,
+            radius(start).unwrap_or(17.0),
+            0.0,
+        );
     }
 
-    let start = parse_zone(start_text, "").ok();
-    let destination = parse_zone(destination_text, "").ok();
-    for zone in graph.keys() {
-        let Some(position) = position(*zone) else {
+    let start = parse_cell_id(start_text, "").ok();
+    let destination = parse_cell_id(destination_text, "").ok();
+    for id in graph.keys() {
+        let Some(position) = position(*id) else {
             continue;
         };
-        let color = if Some(*zone) == start {
+        let color = if Some(*id) == start {
             Color32::from_rgb(55, 160, 95)
-        } else if Some(*zone) == destination {
+        } else if Some(*id) == destination {
             Color32::from_rgb(205, 75, 75)
-        } else if route.is_some_and(|route| route.zones.contains(zone)) {
+        } else if route.is_some_and(|route| route.zones.contains(id)) {
             Color32::from_rgb(65, 125, 205)
         } else {
             Color32::from_rgb(105, 115, 130)
         };
-        painter.circle_filled(position, 17.0, color);
+        painter.circle_filled(position, radius(*id).unwrap_or(17.0), color);
         painter.text(
             position,
             Align2::CENTER_CENTER,
-            zone.to_string(),
+            id.to_string(),
             FontId::proportional(12.0),
             Color32::WHITE,
         );
     }
 
-    if graph.keys().any(|zone| zone_coordinates(*zone).is_none()) {
-        ui.colored_label(
-            Color32::from_rgb(255, 185, 95),
-            "Zones outside coordinates X=1..5, Y=1..5 are omitted from the grid.",
-        );
-    }
-
     if response.drag_started()
         && let Some(pointer) = response.interact_pointer_pos()
-        && let Some(zone) = zone_at_position(grid_rect, cell_width, cell_height, pointer)
+        && let Some(zone) = cell_at_position(map, map_rect, pointer)
     {
         return Some(GridInteraction::DragStarted(zone));
     }
     if response.drag_stopped() {
         let zone = response
             .interact_pointer_pos()
-            .and_then(|pointer| zone_at_position(grid_rect, cell_width, cell_height, pointer));
+            .and_then(|pointer| cell_at_position(map, map_rect, pointer));
         return Some(GridInteraction::DragEnded(zone));
     }
     if response.clicked()
         && let Some(pointer) = response.interact_pointer_pos()
-        && let Some(zone) = zone_at_position(grid_rect, cell_width, cell_height, pointer)
+        && let Some(zone) = cell_at_position(map, map_rect, pointer)
     {
         return Some(GridInteraction::Click(zone));
     }
     None
-}
-
-fn draw_edge(painter: &egui::Painter, source: Pos2, destination: Pos2, highlighted: bool) {
-    draw_edge_with_source_inset(painter, source, destination, highlighted, 18.0);
 }
 
 fn draw_edge_from_handle(
@@ -1393,23 +1579,6 @@ fn draw_edge_from_handle(
         highlighted,
         0.0,
         destination_inset,
-    );
-}
-
-fn draw_edge_with_source_inset(
-    painter: &egui::Painter,
-    source: Pos2,
-    destination: Pos2,
-    highlighted: bool,
-    source_inset: f32,
-) {
-    draw_edge_with_insets(
-        painter,
-        source,
-        destination,
-        highlighted,
-        source_inset,
-        19.0,
     );
 }
 
@@ -1466,63 +1635,63 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::{
-        Pos2, Vec2, complete_grid, egui, empty_map, ensure_portal_directory, json_filename,
-        toggled_target, zone_at_position, zone_coordinates,
+        Pos2, Vec2, cell_at_position, cell_position, egui, ensure_portal_directory, json_filename,
+        toggled_target,
     };
+    use crate::map::{MAP_VERSION, MapLayout, PortalMap};
     use std::{
         fs,
         time::{SystemTime, UNIX_EPOCH},
     };
 
     #[test]
-    fn zone_ids_map_to_x_then_y_coordinates() {
-        assert_eq!(zone_coordinates(12), Some((1, 2)));
-        assert_eq!(zone_coordinates(55), Some((5, 5)));
-        assert_eq!(zone_coordinates(60), None);
-    }
-
-    #[test]
-    fn pointer_positions_map_to_grid_zones_and_reject_outside_points() {
+    fn pointer_positions_select_grid_cells_and_reject_outside_points() {
+        let map = PortalMap::new_grid(5, 5).unwrap();
         let grid = egui::Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(500.0, 500.0));
         assert_eq!(
-            zone_at_position(grid, 100.0, 100.0, Pos2::new(150.0, 250.0)),
+            cell_at_position(&map, grid, Pos2::new(150.0, 250.0)),
             Some(23)
         );
-        assert_eq!(
-            zone_at_position(grid, 100.0, 100.0, Pos2::new(500.0, 250.0)),
-            None
-        );
+        assert_eq!(cell_at_position(&map, grid, Pos2::new(500.0, 250.0)), None);
     }
 
     #[test]
-    fn editor_starts_with_all_twenty_five_grid_nodes() {
-        assert_eq!(empty_map().len(), 25);
+    fn ungridded_cells_have_deterministic_positions_and_can_be_selected() {
+        let mut map = PortalMap::new_graph();
+        map.add_graph_cell().unwrap();
+        map.add_graph_cell().unwrap();
+        map.add_graph_cell().unwrap();
+        let bounds = egui::Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(500.0, 400.0));
+        let position = cell_position(&map, 2, bounds).unwrap();
+        assert_eq!(cell_at_position(&map, bounds, position), Some(2));
+        assert_eq!(map.layout, MapLayout::Graph);
     }
 
     #[test]
-    fn loading_a_sparse_map_adds_editable_nodes_without_changing_existing_exits() {
-        let mut graph = std::collections::BTreeMap::new();
-        graph.insert(
-            12,
-            crate::pathfinding::PortalExits {
-                east: 33,
-                ..Default::default()
-            },
-        );
-
-        let graph = complete_grid(graph);
-        assert_eq!(graph.len(), 25);
-        assert_eq!(graph[&12].east, 33);
-        assert_eq!(graph[&11].east, 0);
+    fn editor_starts_with_all_twenty_five_grid_cells() {
+        assert_eq!(PortalMap::new_grid(5, 5).unwrap().cells.len(), 25);
     }
 
     #[test]
-    fn editor_map_serializes_to_the_portal_json_shape() {
-        let mut graph = empty_map();
-        graph.get_mut(&12).unwrap().north = 22;
-        let json = serde_json::to_value(graph).unwrap();
-        assert_eq!(json["12"]["north"], 22);
-        assert_eq!(json["12"]["west"], 0);
+    fn filling_a_sparse_grid_preserves_existing_cells_and_exits() {
+        let mut map = PortalMap::from_json(r#"{"12":{"east":33},"33":{}}"#).unwrap();
+        map.resize_grid(5, 5).unwrap();
+        assert_eq!(map.cells.len(), 25);
+        assert_eq!(map.cells[&12].exits.east, 33);
+        assert!(map.cells.values().any(|cell| cell.exits.east == 0));
+    }
+
+    #[test]
+    fn editor_map_serializes_with_versioned_layout_and_numeric_cells() {
+        let mut map = PortalMap::new_grid(2, 1).unwrap();
+        let id = map.cell_at(1, 1).unwrap();
+        let target = map.cell_at(2, 1).unwrap();
+        map.cells.get_mut(&id).unwrap().exits.north = target;
+        let json = serde_json::to_value(map).unwrap();
+        assert_eq!(json["version"], MAP_VERSION);
+        assert_eq!(json["layout"]["type"], "grid");
+        assert_eq!(json["cells"][id.to_string()]["north"], target);
+        assert_eq!(json["cells"][id.to_string()]["x"], 1);
     }
 
     #[test]

@@ -39,7 +39,7 @@ impl std::fmt::Display for Direction {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PortalExits {
     #[serde(default)]
     pub west: u64,

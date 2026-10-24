@@ -1,10 +1,10 @@
 # Portal Solver
 
-Version `0.1.5`
+Version `0.1.6`
 
-A native desktop app for finding the fewest portal hops between numeric zones
+A native desktop app for finding the fewest portal hops between numeric cells
 and creating/editing portal maps. The executable is named `portal-solver`.
-Portals are directed: a portal leading north from one zone does not imply that
+Portals are directed: a portal leading north from one cell does not imply that
 the destination has a south portal back.
 
 ## Build and run
@@ -38,57 +38,87 @@ gesture; an arrow follows the pointer while dragging.
 
 ## Portal JSON format
 
-The root object maps numeric zone IDs to their exits. A zone ID encodes its grid
-position as X followed by Y: `12` means X=1, Y=2. The topology view uses a
-1-based 5x5 coordinate grid. Exit values are numeric zone IDs, and `0` means
-there is no portal in that direction. Missing direction fields are treated as
-no portal. Every nonzero destination must also exist as a zone in the same file.
+New maps use version 3. The layout is either a rectangular `grid` with
+1-based `x`/`y` coordinates, or an ungridded `graph`. In grid maps, cell IDs
+encode X followed by Y (`11`, `12`, `23`, etc.); each dimension is limited to 9
+to keep those IDs unambiguous. In ungridded maps, IDs are independent numeric
+labels. ID `0` is reserved to mean no portal. Each exit points to another cell
+ID in the same map. Missing directions default to `0`.
 
 ```json
 {
-  "11": {
-    "west": 12,
-    "east": 21,
-    "north": 0,
-    "south": 0
-  },
-  "12": {
-    "north": 22
-  },
-  "21": {
-    "east": 22
-  },
-  "22": {
-    "south": 33
-  },
-  "33": {}
+  "version": 3,
+  "layout": { "type": "grid", "width": 4, "height": 2 },
+  "cells": {
+    "11": { "x": 1, "y": 1, "east": 42 },
+    "42": { "x": 4, "y": 2, "north": 11 }
+  }
 }
 ```
 
+An ungridded map uses `"layout": { "type": "graph" }`; its `cells` object
+contains only numeric IDs and exits. The app automatically arranges these cells
+in a graph view. For example:
+
+```json
+{
+  "version": 3,
+  "layout": { "type": "graph" },
+  "cells": {
+    "7": { "east": 88 },
+    "88": { "south": 7 }
+  }
+}
+```
+
+Every nonzero destination must refer to a cell in the file.
+
+Existing unversioned maps remain supported. In that legacy format, the root
+object maps numeric zone IDs to exits and each ID encodes its 5x5 position as X
+followed by Y (`12` means X=1, Y=2). Legacy maps load without being rewritten;
+saving one from the editor writes it in the current format with the same
+coordinate-based IDs. Older versioned maps are upgraded in memory through
+ordered migration stages: legacy syntax to version 2, then version 2 to version
+3. The latter converts grid IDs to coordinate-based IDs and updates portal
+destinations. Saving writes the current format; simply loading a map never
+rewrites its file.
+
+When changing map syntax, increment `MAP_VERSION` and add a dedicated migration
+from the previous version in `src/map_migrations.rs`. Each stage should upgrade
+only one version and be covered by migration tests; the loader applies stages in
+order and rejects versions without a defined path.
+
 Arrows show directed portals, which may connect non-adjacent coordinates. The
 pathfinder displays only arrows belonging to the current route. The route's full
-direction list and zone sequence appear below the grid. It chooses the route
+direction list and cell sequence appear below the grid. It chooses the route
 with the fewest portals; when routes have equal length, it prefers the most
 consecutive opposite-direction pairs (for example, north followed by south).
 It never chooses a longer route just to add a doubling-back pair.
 
 ## Creating a portal map
 
-Choose **Map editor** from the mode selector. Select a node, then set its West,
-North, East, and South target zone IDs (`0` or blank means no portal). Choose
-**Apply targets** to preview field edits. The selected node's outgoing arrows
+Choose **Map editor** from the mode selector. Create a grid or ungridded map, or
+load an existing map. Grid dimensions can be resized up to 9 cells per
+dimension; cells outside a smaller resized grid are removed and portals pointing
+to removed cells are cleared. Ungridded maps let you add or remove cells, and
+the remaining cells are arranged automatically. Select a cell, then set its
+West, North, East, and South target IDs (`0` or blank means no portal). Choose
+**Apply targets** to preview field edits. The selected cell's outgoing arrows
 are highlighted. Each edge has a circular direction handle: click a handle and
 then a destination tile, or drag the handle to a tile, to set the target
 visually. Dragging a handle onto its existing destination clears that portal
-back to `0`.
+back to `0`. In an ungridded map, edit the selected cell's numeric ID and choose
+**Rename selected cell** to change its label; all portals pointing to that cell
+are updated to use the new ID. IDs must be unique and nonzero.
 
 To edit an existing map, select it under **Existing map** and choose **Load for
 editing**. Use **Save changes** to update that map. To create a new map, choose
-**New empty map**, enter a filename, then choose **Create JSON file**; this
-always creates a separate file and does not overwrite existing maps.
+**New 5x5 grid** or **New ungridded map**, enter a filename, then choose
+**Create JSON file**; this always creates a separate file and does not overwrite
+existing maps.
 
-In both modes, the grid stays above the mode's instructions, controls, and route
-details so updates to those displays do not move the grid.
+In both modes, the topology view stays above the mode's instructions, controls,
+and route details so updates to those displays do not move it.
 
 ## Updating the app
 
